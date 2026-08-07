@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Traitor Engineer</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <section id="screen-join" class="screen active">
+    <h1>Traitor Engineer</h1>
+    <p class="subtitle">Prototype build</p>
+    <input id="name-input" maxlength="16" placeholder="Your name">
+    <button id="join-btn">Join lobby</button>
+  </section>
+
+  <section id="screen-lobby" class="screen">
+    <h2>Lobby</h2>
+    <ul id="lobby-players"></ul>
+    <p id="lobby-hint" class="hint">Need at least 4 players to start.</p>
+    <button id="start-btn" style="display:none">Start game</button>
+  </section>
+
+  <section id="screen-game" class="screen">
+    <div id="hud">
+      <div id="role-badge"></div>
+      <div id="task-progress"></div>
+      <div id="sabotage-banner" class="hidden"></div>
+    </div>
+
+    <div id="room-panel">
+      <h3>Rooms</h3>
+      <div id="room-list"></div>
+    </div>
+
+    <div id="players-panel">
+      <h3>Players</h3>
+      <div id="player-list"></div>
+    </div>
+
+    <div id="task-panel" class="hidden">
+      <h3>Your tasks</h3>
+      <div id="task-list"></div>
+    </div>
+
+    <div id="traitor-panel" class="hidden">
+      <h3>Traitor tools</h3>
+      <button id="sabotage-btn">Trigger sabotage</button>
+      <button id="kill-btn">Kill someone in your room</button>
+    </div>
+
+    <div id="actions-panel">
+      <button id="report-btn">Report a body</button>
+      <button id="meeting-btn">Call emergency meeting</button>
+    </div>
+  </section>
+
+  <section id="screen-meeting" class="screen">
+    <h2 id="meeting-reason"></h2>
+    <div id="meeting-timer"></div>
+    <div id="meeting-players"></div>
+    <div id="meeting-result"></div>
+  </section>
+
+  <section id="screen-gameover" class="screen">
+    <h2 id="gameover-title"></h2>
+    <p id="gameover-reason"></p>
+    <div id="gameover-roles"></div>
+    <button id="restart-btn" style="display:none">Back to lobby</button>
+  </section>
+
+  <div id="toast"></div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
