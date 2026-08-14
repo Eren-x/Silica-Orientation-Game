@@ -22,7 +22,7 @@ body {
 }
 
 #app {
-  max-width: 720px;
+  max-width: 820px;
   margin: 0 auto;
   padding: 24px 16px 80px;
 }
@@ -62,7 +62,65 @@ button:hover { border-color: var(--accent); }
 button:active { transform: scale(0.98); }
 button:disabled { opacity: 0.4; cursor: not-allowed; }
 
-#join-btn, #start-btn { width: 100%; background: var(--accent); border-color: var(--accent); color: white; }
+#join-btn, #start-btn, #host-restart-btn, #host-join-btn { width: 100%; background: var(--accent); border-color: var(--accent); color: white; }
+
+.join-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 20px;
+}
+@media (max-width: 640px) {
+  .join-cards { grid-template-columns: 1fr; }
+}
+.join-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px;
+}
+.join-card h2 { margin-top: 0; }
+.host-card { border-color: var(--danger); }
+.host-card h2 { color: var(--danger); }
+
+.inline-error {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: rgba(224,82,74,0.12);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.color-wheel {
+  position: relative;
+  margin: 8px auto 12px;
+  background: radial-gradient(circle, rgba(50,59,79,0.25) 0%, transparent 70%);
+}
+.swatch {
+  position: absolute;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 2px solid rgba(0,0,0,0.4);
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  transition: transform 0.1s;
+}
+.swatch:hover { transform: scale(1.15); }
+.swatch.selected { border-color: var(--text); box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); }
+.swatch.taken { opacity: 0.2; cursor: not-allowed; }
+
+.dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
 
 #lobby-players { list-style: none; padding: 0; }
 #lobby-players li { padding: 10px 12px; background: var(--panel); border-radius: 8px; margin-bottom: 6px; }
@@ -75,23 +133,15 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   margin-bottom: 16px;
 }
 
-#role-badge {
+#role-badge, #color-chip, #progress-pill {
   padding: 6px 12px;
   border-radius: 999px;
-  font-weight: 600;
   font-size: 13px;
   background: var(--panel-light);
 }
-#role-badge.traitor { background: rgba(224,82,74,0.2); color: var(--danger); }
-#role-badge.engineer { background: rgba(62,207,142,0.2); color: var(--success); }
 
-#task-progress {
-  font-size: 13px;
-  color: var(--text-dim);
-  padding: 6px 12px;
-  background: var(--panel-light);
-  border-radius: 999px;
-}
+#role-badge.traitor { background: rgba(224,82,74,0.2); color: var(--danger); font-weight: 600; }
+#role-badge.engineer { background: rgba(62,207,142,0.2); color: var(--success); font-weight: 600; }
 
 #sabotage-banner {
   width: 100%;
@@ -104,12 +154,56 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   font-size: 14px;
 }
 
-#room-panel, #players-panel, #task-panel, #traitor-panel, #actions-panel {
+#minimap-panel, #room-panel, #players-panel, #question-panel, #traitor-panel, #actions-panel {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 14px;
   margin-bottom: 12px;
+}
+
+#minimap {
+  position: relative;
+  overflow: hidden;
+}
+
+.map-node {
+  position: absolute;
+  width: 120px;
+  height: 46px;
+  padding: 4px 8px;
+  background: var(--panel-light);
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 12px;
+  text-align: center;
+  cursor: pointer;
+  z-index: 2;
+  transition: transform 0.15s, box-shadow 0.15s, background 0.15s;
+}
+.node-icon { font-size: 16px; }
+.map-node .node-name { line-height: 1.15; }
+.map-node:hover { transform: scale(1.04); }
+.map-node.current {
+  background: var(--accent);
+  color: white;
+  box-shadow: 0 0 0 3px rgba(79,140,255,0.3);
+}
+.vent-line { animation: vent-dash 1s linear infinite; }
+@keyframes vent-dash { to { stroke-dashoffset: -14; } }
+
+.map-player-dot {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1px solid var(--bg);
+  z-index: 3;
+  pointer-events: none;
 }
 
 .room-btn {
@@ -119,7 +213,6 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   margin-bottom: 6px;
 }
 .room-btn.current { border-color: var(--accent); background: rgba(79,140,255,0.15); }
-.room-btn .vent-tag { font-size: 11px; color: var(--warn); margin-left: 6px; }
 
 .player-row {
   display: flex;
@@ -132,6 +225,23 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 .player-row.dead { color: var(--text-dim); text-decoration: line-through; }
 .player-row .room-tag { color: var(--text-dim); font-size: 12px; }
 
+#question-panel { border-color: var(--warn); }
+.timer-bar {
+  width: 100%;
+  height: 8px;
+  background: var(--panel-light);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 4px;
+}
+#timer-fill {
+  height: 100%;
+  width: 100%;
+  background: var(--warn);
+  transition: width 0.1s linear;
+}
+#timer-label { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
+
 .task-card {
   background: var(--panel-light);
   border: 1px solid var(--border);
@@ -139,13 +249,14 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
   padding: 12px;
   margin-bottom: 8px;
 }
-.task-card.done { opacity: 0.5; }
 .task-card .prompt { font-weight: 600; margin-bottom: 8px; }
 .task-card .options { display: flex; gap: 8px; }
 .task-card .options button { flex: 1; margin: 0; }
 
 #traitor-panel { border-color: var(--danger); }
 #sabotage-btn, #kill-btn { width: 100%; background: rgba(224,82,74,0.15); border-color: var(--danger); color: var(--danger); }
+
+#toggle-row button { width: 100%; border-color: var(--warn); color: var(--warn); }
 
 #actions-panel button { width: 100%; }
 
@@ -181,3 +292,49 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 #gameover-title { font-size: 26px; }
 #gameover-roles { margin: 16px 0; }
+
+#host-actions { display: flex; gap: 8px; }
+#host-actions button { flex: 1; }
+
+.host-rooms { margin: 8px 0 12px; }
+.host-room-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  background: var(--panel-light);
+  border-radius: 8px;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.ready-list {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+.ready-list li {
+  padding: 8px 12px;
+  background: var(--panel-light);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+#host-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 12px 0;
+  font-size: 13px;
+}
+#host-table th, #host-table td {
+  text-align: left;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+#host-table th { color: var(--text-dim); font-weight: 600; }
+#host-table td.role-traitor { color: var(--danger); font-weight: 600; }
+#host-table td.role-engineer { color: var(--success); }

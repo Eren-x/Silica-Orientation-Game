@@ -1,15 +1,11 @@
 """
 Traitor Engineer - prototype server
 ------------------------------------
-A minimal but fully playable implementation of the core loop from the GDD:
-lobby -> role assignment -> tasks & sabotage -> meetings & voting -> win check.
+Lobby -> role assignment -> one-question-at-a-time tasks (10s timer)
+-> sabotage/kill -> meetings -> voting -> win check.
 
 Run with:  python server.py
 Then open http://localhost:8000 in a browser tab per player.
-
-This is a SINGLE global lobby (one game at a time) to keep the code readable.
-See README.md for how to extend it to multiple concurrent lobbies, add more
-task types, add a repair minigame for sabotage, etc.
 """
 
 import asyncio
@@ -18,16 +14,13 @@ import random
 import string
 import time
 from typing import Optional
+import colorsys
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 app = FastAPI()
-
-# ---------------------------------------------------------------------------
-# Game configuration (tune these -- see section 8/9 of the GDD)
-# ---------------------------------------------------------------------------
 
 ROOMS = [
     "Reactor Core",
@@ -38,10 +31,44 @@ ROOMS = [
     "Assembly Line",
 ]
 
-# Vent pairs: traitors standing in one of a pair can vent to the other instantly.
 VENT_PAIRS = [("Electrical Bay", "Storage")]
 
-TASKS_PER_ENGINEER = 3
+ROOM_POSITIONS = {
+    "Reactor Core":      {"x": 0, "y": 0},
+    "Workshop":          {"x": 2, "y": 0},
+    "Admin / Security":  {"x": 0, "y": 1},
+    "Electrical Bay":    {"x": 2, "y": 1},
+    "Assembly Line":     {"x": 0, "y": 2},
+    "Storage":           {"x": 2, "y": 2},
+}
+
+ADJACENT_PAIRS = [
+    ("Reactor Core",     "Workshop"),
+    ("Reactor Core",     "Admin / Security"),
+    ("Workshop",         "Electrical Bay"),
+    ("Admin / Security", "Electrical Bay"),
+    ("Admin / Security", "Assembly Line"),
+    ("Electrical Bay",   "Storage"),
+    ("Assembly Line",    "Storage"),
+]
+
+def make_palette(n: int = 48) -> list:
+    """Evenly spaced colours using the golden angle for max distinctness."""
+    colors = []
+    for i in range(n):
+        hue = (i * 0.618033988749895) % 1.0
+        r, g, b = colorsys.hls_to_rgb(hue, 0.55, 0.85)
+        colors.append("#{:02x}{:02x}{:02x}".format(
+            int(r * 255 + 0.5), int(g * 255 + 0.5), int(b * 255 + 0.5)))
+    return colors
+
+
+PLAYER_COLORS = make_palette()
+
+HOST_PASSWORD = "1234"
+QUESTIONS_PER_ENGINEER = 3
+QUESTION_SECONDS = 10
+QUESTION_AFTER_ANSWER_DELAY = 0.0
 DISCUSSION_SECONDS = 45
 VOTING_SECONDS = 20
 SABOTAGE_COOLDOWN = 25
@@ -52,7 +79,6 @@ TASK_TYPES = ["logic_gate", "binary_decode"]
 
 
 def traitor_count(num_players: int) -> int:
-    """Simple scaling curve -- roughly 1 traitor per 5 players, min 1."""
     if num_players < 5:
         return 1
     return max(1, num_players // 5)
@@ -64,49 +90,66 @@ def make_task(task_id: int) -> dict:
         gate = random.choice(["AND", "OR", "XOR"])
         a, b = random.randint(0, 1), random.randint(0, 1)
         answer = {"AND": a & b, "OR": a | b, "XOR": a ^ b}[gate]
-        return {
-            "id": task_id,
-            "type": "logic_gate",
-            "prompt": f"{a} {gate} {b} = ?",
-            "options": [0, 1],
-            "answer": answer,
-            "done": False,
-        }
-    else:  # binary_decode
+        prompt = f"{a} {gate} {b} = ?"
+        options = [0, 1]
+    else:
         n = random.randint(1, 31)
-        return {
-            "id": task_id,
-            "type": "binary_decode",
-            "prompt": f"Decode binary {format(n, '05b')} to decimal",
-            "options": sorted({n, n + 1, max(0, n - 1), n + 4})[:4],
-            "answer": n,
-            "done": False,
-        }
+        prompt = f"Decode binary {format(n, '05b')} to decimal"
+        options = sorted({n, n + 1, max(0, n - 1), n + 4})[:4]
+        answer = n
+    return {
+        "id": task_id,
+        "type": kind,
+        "prompt": prompt,
+        "options": options,
+        "answer": answer,
+    }
 
 
-# ---------------------------------------------------------------------------
-# Game state
-# ---------------------------------------------------------------------------
+def public_task(task: dict) -> dict:
+    return {
+        "id": task["id"],
+        "type": task["type"],
+        "prompt": task["prompt"],
+        "options": task["options"],
+    }
+
 
 class Player:
-    def __init__(self, pid: str, ws: WebSocket, name: str):
+    def __init__(self, pid: str, ws: WebSocket, name: str, color: str):
         self.id = pid
         self.ws = ws
         self.name = name
-        self.role = "engineer"  # or "traitor"
+        self.color = color
+        self.role = "engineer"
         self.alive = True
         self.room = "Admin / Security"
-        self.tasks = []
         self.host = False
+        self.target_questions = 0
+        self.stats = {"attempted": 0, "correct": 0, "incorrect": 0}
+        self.current_question: Optional[dict] = None
+        self.question_deadline: float = 0.0
+        self.question_timeout_task: Optional[asyncio.Task] = None
+        self.question_id_seq: int = 0
         self.last_kill_time = 0.0
 
     def public(self):
         return {
             "id": self.id,
             "name": self.name,
+            "color": self.color,
             "alive": self.alive,
             "room": self.room,
             "host": self.host,
+        }
+
+    def host_view(self):
+        return {
+            **self.public(),
+            "role": self.role,
+            "target": self.target_questions,
+            "stats": self.stats,
+            "has_question": self.current_question is not None,
         }
 
 
@@ -115,8 +158,14 @@ class Game:
         self.reset()
 
     def reset(self):
+        existing = list(self.players.values()) if hasattr(self, "players") else []
+        existing += [self.host] if getattr(self, "host", None) else []
+        for p in existing:
+            if p and p.question_timeout_task and not p.question_timeout_task.done():
+                p.question_timeout_task.cancel()
         self.players: dict[str, Player] = {}
-        self.state = "lobby"  # lobby | playing | meeting | ended
+        self.host: Optional[Player] = None
+        self.state = "lobby"
         self.sabotage_active: Optional[dict] = None
         self.last_sabotage_time = 0.0
         self.meeting: Optional[dict] = None
@@ -132,18 +181,6 @@ class Game:
     def alive_traitors(self):
         return [p for p in self.alive_players() if p.role == "traitor"]
 
-    def total_tasks(self):
-        return sum(len(p.tasks) for p in self.players.values() if p.role == "engineer")
-
-    def done_tasks(self):
-        return sum(
-            1
-            for p in self.players.values()
-            if p.role == "engineer"
-            for t in p.tasks
-            if t["done"]
-        )
-
 
 game = Game()
 
@@ -151,10 +188,6 @@ game = Game()
 def gen_id():
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
 
-
-# ---------------------------------------------------------------------------
-# Broadcasting
-# ---------------------------------------------------------------------------
 
 async def broadcast(msg: dict, exclude: Optional[str] = None):
     dead = []
@@ -171,7 +204,7 @@ async def broadcast(msg: dict, exclude: Optional[str] = None):
 
 
 async def send(pid: str, msg: dict):
-    p = game.players.get(pid)
+    p = game.players.get(pid) or (game.host if game.host and game.host.id == pid else None)
     if not p:
         return
     try:
@@ -184,11 +217,17 @@ def lobby_state():
     return {
         "type": "lobby_update",
         "players": [p.public() for p in game.players.values()],
+        "host_present": game.host is not None,
+        "ready": len(game.players),
     }
 
 
 async def broadcast_lobby():
-    await broadcast(lobby_state())
+    state = lobby_state()
+    await broadcast(state)
+    if game.host:
+        await send(game.host.id, state)
+        await send(game.host.id, host_state())
 
 
 def public_state():
@@ -197,19 +236,89 @@ def public_state():
         "state": game.state,
         "players": [p.public() for p in game.players.values()],
         "rooms": ROOMS,
+        "map_layout": ROOM_POSITIONS,
+        "adjacent": ADJACENT_PAIRS,
         "sabotage_active": game.sabotage_active,
-        "tasks_done": game.done_tasks(),
-        "tasks_total": game.total_tasks(),
     }
 
 
 async def broadcast_state():
     await broadcast(public_state())
+    await broadcast_host_state()
 
 
-# ---------------------------------------------------------------------------
-# Game flow
-# ---------------------------------------------------------------------------
+async def broadcast_host_state():
+    if not game.host:
+        return
+    await send(game.host.id, host_state())
+
+
+def host_state():
+    return {
+        "type": "host_state",
+        "state": game.state,
+        "winner": game.winner,
+        "sabotage_active": game.sabotage_active,
+        "map_layout": ROOM_POSITIONS,
+        "adjacent": ADJACENT_PAIRS,
+        "players": [p.host_view() for p in game.players.values()],
+    }
+
+
+async def cancel_question(player: Player):
+    if player.question_timeout_task and not player.question_timeout_task.done():
+        player.question_timeout_task.cancel()
+    player.question_timeout_task = None
+    player.current_question = None
+    player.question_deadline = 0.0
+
+
+async def issue_question(player: Player):
+    if not player.alive or game.state != "playing":
+        return
+    if player.role != "engineer":
+        return
+    await cancel_question(player)
+    task = make_task(game.next_task_id)
+    game.next_task_id += 1
+    player.current_question = task
+    player.question_deadline = time.time() + QUESTION_SECONDS
+    await send(player.id, {
+        "type": "question",
+        "question": public_task(task),
+        "deadline": player.question_deadline,
+        "seconds": QUESTION_SECONDS,
+    })
+    player.question_timeout_task = asyncio.create_task(
+        question_timeout(player, task["id"], player.question_deadline)
+    )
+
+
+async def question_timeout(player: Player, qid: int, deadline: float):
+    try:
+        await asyncio.sleep(max(0.0, deadline - time.time()))
+    except asyncio.CancelledError:
+        return
+    if game.state != "playing":
+        return
+    if not player.alive:
+        return
+    if player.current_question is None or player.current_question["id"] != qid:
+        return
+    player.stats["attempted"] += 1
+    player.stats["incorrect"] += 1
+    await send(player.id, {
+        "type": "task_result",
+        "task_id": qid,
+        "correct": False,
+        "reason": "timeout",
+    })
+    player.current_question = None
+    player.question_deadline = 0.0
+    player.question_timeout_task = None
+    await broadcast_state()
+    await issue_question(player)
+
 
 async def start_game():
     players = list(game.players.values())
@@ -221,11 +330,9 @@ async def start_game():
         p.alive = True
         p.room = "Admin / Security"
         p.role = "traitor" if p.id in traitor_ids else "engineer"
-        p.tasks = []
-        if p.role == "engineer":
-            for _ in range(TASKS_PER_ENGINEER):
-                p.tasks.append(make_task(game.next_task_id))
-                game.next_task_id += 1
+        p.target_questions = QUESTIONS_PER_ENGINEER if p.role == "engineer" else 0
+        p.stats = {"attempted": 0, "correct": 0, "incorrect": 0}
+        p.last_kill_time = 0.0
 
     game.state = "playing"
     game.sabotage_active = None
@@ -235,12 +342,21 @@ async def start_game():
     for p in players:
         await send(p.id, {
             "type": "game_started",
+            "your_id": p.id,
             "your_role": p.role,
-            "your_tasks": p.tasks,
+            "your_color": p.color,
+            "your_target": p.target_questions,
             "rooms": ROOMS,
+            "map_layout": ROOM_POSITIONS,
+            "adjacent": ADJACENT_PAIRS,
             "vent_pairs": VENT_PAIRS if p.role == "traitor" else [],
         })
+
     await broadcast_state()
+
+    for p in players:
+        if p.role == "engineer":
+            await issue_question(p)
 
 
 async def check_win():
@@ -249,8 +365,8 @@ async def check_win():
     engineers = game.alive_engineers()
     traitors = game.alive_traitors()
 
-    if game.done_tasks() >= game.total_tasks() and game.total_tasks() > 0:
-        await end_game("engineers", "All project tasks completed")
+    if engineers and all(p.stats["correct"] >= p.target_questions for p in engineers):
+        await end_game("engineers", "All engineers completed their questions")
     elif len(traitors) == 0:
         await end_game("engineers", "All traitors eliminated")
     elif len(traitors) >= len(engineers):
@@ -258,17 +374,23 @@ async def check_win():
 
 
 async def end_game(winner: str, reason: str):
+    for p in game.players.values():
+        await cancel_question(p)
     game.state = "ended"
     game.winner = winner
-    await broadcast({
+    payload = {
         "type": "game_over",
         "winner": winner,
         "reason": reason,
         "roles": {p.id: p.role for p in game.players.values()},
-    })
+    }
+    await broadcast(payload)
+    await broadcast_host_state()
 
 
 async def start_meeting(reason: str, caller_id: str):
+    for p in game.players.values():
+        await cancel_question(p)
     game.state = "meeting"
     game.meeting = {
         "reason": reason,
@@ -332,10 +454,6 @@ async def resolve_votes():
     await check_win()
 
 
-# ---------------------------------------------------------------------------
-# WebSocket endpoint
-# ---------------------------------------------------------------------------
-
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
@@ -349,21 +467,53 @@ async def ws_endpoint(ws: WebSocket):
             mtype = msg.get("type")
 
             if mtype == "join":
+                if game.state != "lobby" and game.players:
+                    await send_to_ws(ws, {"type": "error", "message": "Game already in progress"})
+                    continue
+                if game.state != "lobby" and not game.players:
+                    game.reset()
                 name = (msg.get("name") or "Player")[:16]
-                player = Player(pid, ws, name)
-                if not game.players:
+                color = msg.get("color") if msg.get("color") in PLAYER_COLORS else PLAYER_COLORS[0]
+                as_host = bool(msg.get("as_host"))
+                taken_names = {p.name.lower() for p in game.players.values()}
+                taken_colors = {p.color for p in game.players.values()}
+                if not as_host:
+                    if name.lower() in taken_names:
+                        await send_to_ws(ws, {"type": "error", "message": "That name is already taken"})
+                        continue
+                    if color in taken_colors:
+                        await send_to_ws(ws, {"type": "error", "message": "That colour is already taken"})
+                        continue
+                if as_host:
+                    if game.host is not None:
+                        await send_to_ws(ws, {"type": "error", "message": "A host already exists"})
+                        continue
+                    if msg.get("password") != HOST_PASSWORD:
+                        await send_to_ws(ws, {"type": "error", "message": "Wrong host password"})
+                        continue
+                    player = Player(pid, ws, name, color)
                     player.host = True
+                    player.target_questions = 0
+                    game.host = player
+                    await send_to_ws(ws, {"type": "joined", "your_id": pid, "is_host": True})
+                    await broadcast_lobby()
+                    continue
+                player = Player(pid, ws, name, color)
                 game.players[pid] = player
-                await send(pid, {"type": "joined", "your_id": pid})
+                await send_to_ws(ws, {"type": "joined", "your_id": pid, "is_host": False})
                 await broadcast_lobby()
                 continue
 
             if player is None:
-                continue  # ignore messages before join
+                continue
 
-            if mtype == "start_game" and player.host and game.state == "lobby":
+            if mtype == "start_game":
+                if not player.host:
+                    continue
+                if game.state != "lobby":
+                    continue
                 if len(game.players) < 4:
-                    await send(pid, {"type": "error", "message": "Need at least 4 players"})
+                    await send_to_ws(ws, {"type": "error", "message": "Need at least 4 players"})
                 else:
                     await start_game()
 
@@ -372,6 +522,10 @@ async def ws_endpoint(ws: WebSocket):
                 if room in ROOMS:
                     player.room = room
                     await broadcast_state()
+                    if player.role == "engineer":
+                        await issue_question(player)
+                    else:
+                        await send_to_ws(ws, {"type": "question", "question": None, "deadline": 0, "seconds": 0})
 
             elif mtype == "vent" and game.state == "playing" and player.alive and player.role == "traitor":
                 target_room = msg.get("room")
@@ -385,26 +539,44 @@ async def ws_endpoint(ws: WebSocket):
                     player.room = target_room
                     await broadcast_state()
 
-            elif mtype == "do_task" and game.state == "playing" and player.alive and player.role == "engineer":
+            elif mtype == "do_task" and game.state == "playing" and player.alive:
+                if player.current_question is None:
+                    continue
                 task_id = msg.get("task_id")
+                if task_id != player.current_question["id"]:
+                    continue
+                if time.time() > player.question_deadline:
+                    continue
                 answer = msg.get("answer")
-                for t in player.tasks:
-                    if t["id"] == task_id and not t["done"]:
-                        if answer == t["answer"] and not game.sabotage_active:
-                            t["done"] = True
-                            await send(pid, {"type": "task_result", "task_id": task_id, "correct": True})
-                            await broadcast_state()
-                            await check_win()
-                        else:
-                            await send(pid, {"type": "task_result", "task_id": task_id, "correct": False})
-                        break
+                correct = answer == player.current_question["answer"] and not game.sabotage_active
+                player.stats["attempted"] += 1
+                if correct:
+                    player.stats["correct"] += 1
+                else:
+                    player.stats["incorrect"] += 1
+                await send_to_ws(ws, {
+                    "type": "task_result",
+                    "task_id": task_id,
+                    "correct": correct,
+                    "reason": "sabotage" if game.sabotage_active else ("wrong" if not correct else None),
+                })
+                await cancel_question(player)
+                await broadcast_state()
+                if correct:
+                    await check_win()
+                    if game.state == "playing" and player.alive and player.role == "engineer":
+                        if player.stats["correct"] < player.target_questions:
+                            await issue_question(player)
+                elif game.state == "playing" and player.alive and player.role == "engineer":
+                    if player.stats["correct"] < player.target_questions:
+                        await issue_question(player)
 
             elif mtype == "sabotage" and game.state == "playing" and player.alive and player.role == "traitor":
                 now = time.time()
                 if game.sabotage_active:
-                    await send(pid, {"type": "error", "message": "A sabotage is already active"})
+                    await send_to_ws(ws, {"type": "error", "message": "A sabotage is already active"})
                 elif now - game.last_sabotage_time < SABOTAGE_COOLDOWN:
-                    await send(pid, {"type": "error", "message": "Sabotage on cooldown"})
+                    await send_to_ws(ws, {"type": "error", "message": "Sabotage on cooldown"})
                 else:
                     kind = msg.get("kind", "Power Failure")
                     game.sabotage_active = {"kind": kind, "ends_at": now + SABOTAGE_DURATION}
@@ -415,11 +587,12 @@ async def ws_endpoint(ws: WebSocket):
             elif mtype == "kill" and game.state == "playing" and player.alive and player.role == "traitor":
                 now = time.time()
                 if now - player.last_kill_time < KILL_COOLDOWN:
-                    await send(pid, {"type": "error", "message": "Kill on cooldown"})
+                    await send_to_ws(ws, {"type": "error", "message": "Kill on cooldown"})
                 else:
                     target_id = msg.get("target_id")
                     target = game.players.get(target_id)
                     if target and target.alive and target.role == "engineer" and target.room == player.room:
+                        await cancel_question(target)
                         target.alive = False
                         player.last_kill_time = now
                         await broadcast_state()
@@ -447,22 +620,44 @@ async def ws_endpoint(ws: WebSocket):
                         await resolve_votes()
 
             elif mtype == "restart" and player.host:
+                old_host = game.host
                 game.reset()
-                game.players[pid] = player
-                player.host = True
+                game.host = old_host
+                if game.host:
+                    await send_to_ws(game.host.ws, {"type": "joined", "your_id": game.host.id, "is_host": True})
                 await broadcast_lobby()
 
     except WebSocketDisconnect:
+        if game.host and game.host.id == pid:
+            game.host = None
         if pid in game.players:
-            was_host = game.players[pid].host
-            del game.players[pid]
-            if was_host and game.players:
-                next_host = next(iter(game.players.values()))
-                next_host.host = True
-            if game.state == "lobby":
-                await broadcast_lobby()
-            else:
-                await broadcast_state()
+            p = game.players.pop(pid)
+            await cancel_question(p)
+        if not game.players:
+            game.reset()
+            return
+        if game.host is None and game.players:
+            new_host = next(iter(game.players.values()))
+            new_host.host = True
+            game.host = new_host
+            active = game.state not in ("lobby", "ended")
+            await send(new_host.id, {
+                "type": "you_are_host",
+                "active": active,
+            })
+        if game.state == "lobby":
+            await broadcast_lobby()
+        else:
+            await broadcast_state()
+            if game.state == "playing":
+                await check_win()
+
+
+async def send_to_ws(ws, msg: dict):
+    try:
+        await ws.send_text(json.dumps(msg))
+    except Exception:
+        pass
 
 
 async def clear_sabotage_after(seconds: float):
@@ -471,10 +666,6 @@ async def clear_sabotage_after(seconds: float):
         game.sabotage_active = None
         await broadcast_state()
 
-
-# ---------------------------------------------------------------------------
-# Static files (the browser client)
-# ---------------------------------------------------------------------------
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 

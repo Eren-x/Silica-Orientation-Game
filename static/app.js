@@ -1,23 +1,111 @@
+function makePalette(n = 48) {
+  const colors = [];
+  for (let i = 0; i < n; i++) {
+    const hue = (i * 0.618033988749895) % 1.0;
+    colors.push(hlsToHex(hue, 0.55, 0.85));
+  }
+  return colors;
+}
+
+function hlsToHex(h, l, s) {
+  let r, g, b;
+  if (s === 0) {
+    r = g = b = l;
+  } else {
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    r = hue2rgb(p, q, h + 1 / 3);
+    g = hue2rgb(p, q, h);
+    b = hue2rgb(p, q, h - 1 / 3);
+  }
+  const toHex = v => Math.round(v * 255).toString(16).padStart(2, "0");
+  return "#" + toHex(r) + toHex(g) + toHex(b);
+}
+
+function hue2rgb(p, q, t) {
+  if (t < 0) t += 1;
+  if (t > 1) t -= 1;
+  if (t < 1 / 6) return p + (q - p) * 6 * t;
+  if (t < 1 / 2) return q;
+  if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+  return p;
+}
+
+const PLAYER_COLORS = makePalette();
+
+const ROOM_COLORS = {
+  "Reactor Core":     "#e0524a",
+  "Workshop":         "#f0a63a",
+  "Admin / Security": "#4f8cff",
+  "Electrical Bay":   "#c77dff",
+  "Storage":          "#ff6bd6",
+  "Assembly Line":    "#3ecf8e",
+};
+
 let ws = null;
 let myId = null;
 let myName = null;
-let isHost = false;
+let myColor = PLAYER_COLORS[0];
 let myRole = null;
-let myTasks = [];
-let currentRoom = "Admin / Security";
+let myTarget = 3;
+let isHost = false;
+let lastJoinAttempt = null;
+let mapLayout = {};
+let adjacentPairs = [];
 let ventPairs = [];
+let currentRoom = "Admin / Security";
 let latestPlayers = [];
+let myQuestion = null;
+let myDeadline = 0;
+let traitorView = "tools";
+let timerHandle = null;
+let takenColors = new Set();
+let takenNames = new Set();
 
 function $(sel) { return document.querySelector(sel); }
+
 function show(id) {
   document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
   $(id).classList.add("active");
 }
+
 function toast(msg) {
   const t = $("#toast");
   t.textContent = msg;
   t.classList.add("show");
   setTimeout(() => t.classList.remove("show"), 2200);
+}
+
+function buildColorWheel() {
+  const wheel = $("#color-wheel");
+  wheel.innerHTML = "";
+  const n = PLAYER_COLORS.length;
+  const SIZE = 280;
+  const RADIUS = (SIZE / 2) - 26;
+  const cx = SIZE / 2;
+  const cy = SIZE / 2;
+  wheel.style.width = SIZE + "px";
+  wheel.style.height = SIZE + "px";
+  PLAYER_COLORS.forEach((c, i) => {
+    const ang = (i / n) * Math.PI * 2 - Math.PI / 2;
+    const x = cx + RADIUS * Math.cos(ang) - 17;
+    const y = cy + RADIUS * Math.sin(ang) - 17;
+    const sw = document.createElement("button");
+    const taken = takenColors.has(c);
+    sw.className = "swatch" + (c === myColor ? " selected" : "") + (taken ? " taken" : "");
+    sw.style.background = c;
+    sw.style.left = x + "px";
+    sw.style.top = y + "px";
+    sw.disabled = taken;
+    sw.title = taken ? "Already taken" : c;
+    sw.dataset.color = c;
+    sw.onclick = () => {
+      myColor = c;
+      document.querySelectorAll("#color-wheel .swatch").forEach(b => b.classList.remove("selected"));
+      sw.classList.add("selected");
+    };
+    wheel.appendChild(sw);
+  });
 }
 
 function connect() {
@@ -27,16 +115,37 @@ function connect() {
   ws.onclose = () => toast("Disconnected from server");
 }
 
-$("#join-btn").onclick = () => {
-  const name = $("#name-input").value.trim();
-  if (!name) return;
+function tryJoin(asHost) {
+  const nameInput = asHost ? $("#h-name") : $("#p-name");
+  const errEl = asHost ? $("#host-error") : $("#join-error");
+  errEl.classList.add("hidden");
+  const name = nameInput.value.trim();
+  if (!name) {
+    errEl.textContent = "Enter a name";
+    errEl.classList.remove("hidden");
+    return;
+  }
   myName = name;
+  lastJoinAttempt = asHost ? "host" : "player";
   connect();
-  ws.onopen = () => ws.send(JSON.stringify({ type: "join", name }));
-};
+  ws.onopen = () => {
+    const payload = { type: "join", name, color: myColor };
+    if (asHost) {
+      payload.as_host = true;
+      payload.password = $("#h-password").value;
+    }
+    ws.send(JSON.stringify(payload));
+  };
+}
 
-$("#start-btn").onclick = () => ws.send(JSON.stringify({ type: "start_game" }));
+$("#join-btn").onclick = () => tryJoin(false);
+$("#host-join-btn").onclick = () => tryJoin(true);
+
+$("#start-btn") && ($("#start-btn").onclick = () => ws.send(JSON.stringify({ type: "start_game" })));
 $("#restart-btn").onclick = () => ws.send(JSON.stringify({ type: "restart" }));
+$("#host-restart-btn").onclick = () => ws.send(JSON.stringify({ type: "restart" }));
+$("#host-start-btn").onclick = () => ws.send(JSON.stringify({ type: "start_game" }));
+
 $("#report-btn").onclick = () => {
   const dead = latestPlayers.find(p => !p.alive && p.room === currentRoom);
   if (!dead) { toast("No body here to report"); return; }
@@ -54,39 +163,91 @@ $("#kill-btn").onclick = () => {
   ws.send(JSON.stringify({ type: "kill", target_id: target.id }));
 };
 
+$("#toggle-view").onclick = () => {
+  traitorView = traitorView === "tools" ? "question" : "tools";
+  applyTraitorView();
+};
+
+function applyTraitorView() {
+  if (myRole !== "traitor") return;
+  if (traitorView === "tools") {
+    $("#question-panel").classList.add("hidden");
+    $("#traitor-panel").classList.remove("hidden");
+    $("#toggle-view").textContent = "Switch to question";
+  } else {
+    $("#traitor-panel").classList.add("hidden");
+    $("#question-panel").classList.remove("hidden");
+    $("#toggle-view").textContent = "Switch to tools";
+  }
+}
+
 function handleMessage(msg) {
   switch (msg.type) {
     case "joined":
       myId = msg.your_id;
-      show("#screen-lobby");
+      isHost = !!msg.is_host;
+      if (isHost) {
+        show("#screen-host");
+      } else {
+        show("#screen-lobby");
+      }
       break;
     case "lobby_update":
-      renderLobby(msg.players);
+      renderLobby(msg);
+      if (myId && !isHost) show("#screen-lobby");
       break;
     case "error":
       toast(msg.message);
+      if (lastJoinAttempt && !myId) {
+        const el = lastJoinAttempt === "host" ? $("#host-error") : $("#join-error");
+        if (el) {
+          el.textContent = msg.message;
+          el.classList.remove("hidden");
+        }
+      }
+      break;
+    case "you_are_host":
+      isHost = true;
+      toast("You are now the host");
+      if (!msg.active) show("#screen-host");
       break;
     case "game_started":
       myRole = msg.your_role;
-      myTasks = msg.your_tasks;
+      myTarget = msg.your_target || 0;
+      mapLayout = msg.map_layout || {};
+      adjacentPairs = msg.adjacent || [];
       ventPairs = msg.vent_pairs || [];
       currentRoom = "Admin / Security";
+      traitorView = "tools";
       show("#screen-game");
       renderRoleBadge();
-      renderTasks();
+      renderColorChip();
+      renderProgress();
+      $("#minimap-panel").classList.remove("hidden");
+      $("#room-panel").classList.remove("hidden");
+      $("#players-panel").classList.remove("hidden");
+      $("#actions-panel").classList.remove("hidden");
+      $("#toggle-row").classList.toggle("hidden", myRole !== "traitor");
       $("#traitor-panel").classList.toggle("hidden", myRole !== "traitor");
-      $("#task-panel").classList.toggle("hidden", myRole !== "engineer");
+      $("#question-panel").classList.remove("hidden");
+      if (myRole === "engineer") {
+        $("#question-panel").classList.remove("hidden");
+      } else {
+        $("#question-panel").classList.remove("hidden");
+      }
       break;
     case "state_update":
       latestPlayers = msg.players;
+      renderMinimap(msg);
       renderRooms(msg.rooms);
       renderPlayers(msg.players);
-      renderProgress(msg.tasks_done, msg.tasks_total);
-      renderSabotage(msg.sabotage_active);
       if (msg.state === "meeting") show("#screen-meeting");
       else if (msg.state === "playing" && document.querySelector("#screen-meeting").classList.contains("active")) {
         show("#screen-game");
       }
+      break;
+    case "question":
+      setQuestion(msg.question, msg.deadline, msg.seconds);
       break;
     case "task_result":
       handleTaskResult(msg);
@@ -111,28 +272,148 @@ function handleMessage(msg) {
     case "game_over":
       renderGameOver(msg);
       break;
+    case "host_state":
+      renderHostDashboard(msg);
+      break;
   }
 }
 
-function renderLobby(players) {
+function renderLobby(msg) {
   const list = $("#lobby-players");
   list.innerHTML = "";
-  players.forEach(p => {
+  takenColors = new Set();
+  takenNames = new Set();
+  msg.players.forEach(p => {
     const li = document.createElement("li");
-    li.textContent = p.name + (p.host ? " (host)" : "");
+    li.innerHTML = `<span class="dot" style="background:${p.color}"></span>${p.name}`;
     list.appendChild(li);
-    if (p.id === myId) isHost = p.host;
+    takenColors.add(p.color);
+    takenNames.add(p.name.toLowerCase());
   });
-  $("#start-btn").style.display = isHost ? "block" : "none";
-  $("#lobby-hint").textContent = players.length < 4
-    ? `Need at least 4 players to start (${players.length}/4).`
-    : `${players.length} players ready.`;
+  const count = msg.players.length;
+  $("#lobby-hint").textContent = count < 4
+    ? `Need at least 4 players to start (${count}/4).`
+    : `${count} players ready.`;
+  if ($("#screen-join").classList.contains("active")) {
+    buildColorWheel();
+  }
 }
 
 function renderRoleBadge() {
   const badge = $("#role-badge");
-  badge.textContent = myRole === "traitor" ? "You are a Traitor" : "You are an Engineer";
+  badge.textContent = myRole === "traitor" ? "Traitor" : "Engineer";
   badge.className = myRole;
+}
+
+function renderColorChip() {
+  $("#color-chip").innerHTML = `<span class="dot" style="background:${myColor}"></span>${myName}`;
+}
+
+function renderProgress() {
+  if (myRole === "engineer") {
+    $("#progress-pill").textContent = `Engineer target: ${myTarget}`;
+  } else {
+    $("#progress-pill").textContent = "";
+  }
+}
+
+const ROOM_ICONS = {
+  "Reactor Core":     "☢️",
+  "Workshop":         "🔧",
+  "Admin / Security": "🛡️",
+  "Electrical Bay":   "⚡",
+  "Storage":          "📦",
+  "Assembly Line":    "🏭",
+};
+
+function renderMinimap(msg) {
+  const map = $("#minimap");
+  map.innerHTML = "";
+  map.style.position = "relative";
+  const layout = msg.map_layout || mapLayout;
+  const adjacent = msg.adjacent || adjacentPairs;
+
+  const NODE_W = 120;
+  const NODE_H = 46;
+  const STEP_X = 150;
+  const STEP_Y = 96;
+  const PAD_X = 10;
+  const PAD_Y = 10;
+
+  const minX = Math.min(...Object.values(layout).map(p => p.x));
+  const maxX = Math.max(...Object.values(layout).map(p => p.x));
+  const minY = Math.min(...Object.values(layout).map(p => p.y));
+  const maxY = Math.max(...Object.values(layout).map(p => p.y));
+  const w = (maxX - minX) * STEP_X + 2 * PAD_X + NODE_W;
+  const h = (maxY - minY) * STEP_Y + 2 * PAD_Y + NODE_H;
+  map.style.width = w + "px";
+  map.style.height = h + "px";
+
+  const cx = room => PAD_X + (layout[room].x - minX) * STEP_X + NODE_W / 2;
+  const cy = room => PAD_Y + (layout[room].y - minY) * STEP_Y + NODE_H / 2;
+
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("width", w);
+  svg.setAttribute("height", h);
+  svg.style.position = "absolute";
+  svg.style.left = "0";
+  svg.style.top = "0";
+  svg.style.pointerEvents = "none";
+
+  for (const [a, b] of adjacent) {
+    if (!layout[a] || !layout[b]) continue;
+    const line = document.createElementNS(svgNS, "line");
+    line.setAttribute("x1", cx(a));
+    line.setAttribute("y1", cy(a));
+    line.setAttribute("x2", cx(b));
+    line.setAttribute("y2", cy(b));
+    line.setAttribute("stroke", "#2b3245");
+    line.setAttribute("stroke-width", "4");
+    line.setAttribute("stroke-linecap", "round");
+    svg.appendChild(line);
+  }
+  for (const [a, b] of (msg.vent_pairs || ventPairs)) {
+    if (!layout[a] || !layout[b]) continue;
+    const line = document.createElementNS(svgNS, "line");
+    line.setAttribute("x1", cx(a));
+    line.setAttribute("y1", cy(a));
+    line.setAttribute("x2", cx(b));
+    line.setAttribute("y2", cy(b));
+    line.setAttribute("stroke", "#f0a63a");
+    line.setAttribute("stroke-width", "3");
+    line.setAttribute("stroke-dasharray", "8 6");
+    line.setAttribute("class", "vent-line");
+    svg.appendChild(line);
+  }
+  map.appendChild(svg);
+
+  for (const room of (msg.rooms || Object.keys(layout))) {
+    if (!layout[room]) continue;
+    const node = document.createElement("div");
+    const color = ROOM_COLORS[room] || "#4f8cff";
+    node.className = "map-node" + (room === currentRoom ? " current" : "");
+    node.style.left = (PAD_X + (layout[room].x - minX) * STEP_X) + "px";
+    node.style.top = (PAD_Y + (layout[room].y - minY) * STEP_Y) + "px";
+    node.style.borderColor = color;
+    node.innerHTML = `<span class="node-icon">${ROOM_ICONS[room] || ""}</span><span class="node-name">${room}</span>`;
+    node.onclick = () => {
+      currentRoom = room;
+      ws.send(JSON.stringify({ type: "move_room", room }));
+    };
+    map.appendChild(node);
+
+    const here = latestPlayers.filter(p => p.alive && p.room === room);
+    here.forEach((p, i) => {
+      const dot = document.createElement("div");
+      dot.className = "map-player-dot";
+      dot.style.background = p.color;
+      dot.style.bottom = "4px";
+      dot.style.left = (8 + i * 13) + "px";
+      dot.title = p.name;
+      node.appendChild(dot);
+    });
+  }
 }
 
 function renderRooms(rooms) {
@@ -181,37 +462,58 @@ function renderPlayers(players) {
   players.forEach(p => {
     const row = document.createElement("div");
     row.className = "player-row" + (p.alive ? "" : " dead");
-    row.innerHTML = `<span>${p.name}${p.id === myId ? " (you)" : ""}</span><span class="room-tag">${p.alive ? p.room : "eliminated"}</span>`;
+    row.innerHTML = `<span><span class="dot" style="background:${p.color}"></span>${p.name}${p.id === myId ? " (you)" : ""}</span><span class="room-tag">${p.alive ? p.room : "eliminated"}</span>`;
     el.appendChild(row);
   });
 }
 
-function renderProgress(done, total) {
-  $("#task-progress").textContent = `Project tasks: ${done}/${total}`;
-}
-
-function renderSabotage(sabotage) {
-  const banner = $("#sabotage-banner");
-  if (sabotage) {
-    banner.textContent = `SABOTAGE ACTIVE: ${sabotage.kind} — tasks blocked until it clears`;
-    banner.classList.remove("hidden");
-  } else {
-    banner.classList.add("hidden");
+function setQuestion(question, deadline, seconds) {
+  if (timerHandle) clearInterval(timerHandle);
+  myQuestion = question;
+  myDeadline = deadline || 0;
+  if (!question) {
+    $("#question-card").innerHTML = `<div class="prompt">No active question — move rooms or switch to question view.</div>`;
+    $("#timer-label").textContent = "";
+    $("#timer-fill").style.width = "0%";
+    if (myRole === "traitor") {
+      if (traitorView === "question") {
+        $("#question-panel").classList.remove("hidden");
+        $("#traitor-panel").classList.add("hidden");
+      } else {
+        $("#question-panel").classList.add("hidden");
+        $("#traitor-panel").classList.remove("hidden");
+      }
+    } else {
+      $("#question-panel").classList.add("hidden");
+    }
+    return;
   }
-}
+  const opts = question.options.map(o =>
+    `<button onclick="submitTask(${question.id}, ${JSON.stringify(o)})">${o}</button>`
+  ).join("");
+  $("#question-card").innerHTML = `<div class="prompt">${question.prompt}</div><div class="options">${opts}</div>`;
 
-function renderTasks() {
-  const el = $("#task-list");
-  el.innerHTML = "";
-  myTasks.forEach(t => {
-    const card = document.createElement("div");
-    card.className = "task-card" + (t.done ? " done" : "");
-    const opts = t.options.map(o =>
-      `<button ${t.done ? "disabled" : ""} onclick="submitTask(${t.id}, ${JSON.stringify(o)})">${o}</button>`
-    ).join("");
-    card.innerHTML = `<div class="prompt">${t.prompt}</div><div class="options">${opts}</div>`;
-    el.appendChild(card);
-  });
+  if (myRole === "traitor" && traitorView === "tools") {
+    $("#question-panel").classList.add("hidden");
+    $("#traitor-panel").classList.remove("hidden");
+  } else {
+    $("#question-panel").classList.remove("hidden");
+    if (myRole === "traitor") {
+      $("#traitor-panel").classList.add("hidden");
+    }
+  }
+
+  const total = seconds || 10;
+  timerHandle = setInterval(() => {
+    const left = Math.max(0, myDeadline - Date.now() / 1000);
+    const pct = Math.max(0, Math.min(100, (left / total) * 100));
+    $("#timer-fill").style.width = pct + "%";
+    $("#timer-label").textContent = left.toFixed(1) + "s";
+    if (left <= 0) {
+      clearInterval(timerHandle);
+      timerHandle = null;
+    }
+  }, 100);
 }
 
 function submitTask(taskId, answer) {
@@ -220,15 +522,12 @@ function submitTask(taskId, answer) {
 window.submitTask = submitTask;
 
 function handleTaskResult(msg) {
-  const task = myTasks.find(t => t.id === msg.task_id);
-  if (!task) return;
+  let text = msg.correct ? "Correct!" : (msg.reason === "timeout" ? "Time's up!" : (msg.reason === "sabotage" ? "Blocked by sabotage" : "Incorrect"));
+  toast(text);
   if (msg.correct) {
-    task.done = true;
-    toast("Task complete");
-  } else {
-    toast("Incorrect, try again");
+    const card = $("#question-card");
+    if (card) card.innerHTML = `<div class="prompt">${myQuestion && myQuestion.prompt || ""} ✓</div>`;
   }
-  renderTasks();
 }
 
 function renderMeetingVoting(enabled) {
@@ -238,9 +537,9 @@ function renderMeetingVoting(enabled) {
     const row = document.createElement("div");
     row.className = "vote-row";
     const btn = enabled
-      ? `<button onclick="castVote('${p.id}')" ${p.id === myId ? "" : ""}>Vote</button>`
+      ? `<button onclick="castVote('${p.id}')">Vote</button>`
       : "";
-    row.innerHTML = `<span>${p.name}${p.id === myId ? " (you)" : ""}</span>${btn}`;
+    row.innerHTML = `<span><span class="dot" style="background:${p.color}"></span>${p.name}${p.id === myId ? " (you)" : ""}</span>${btn}`;
     el.appendChild(row);
   });
   if (enabled) {
@@ -281,8 +580,104 @@ function renderGameOver(msg) {
   latestPlayers.forEach(p => {
     const div = document.createElement("div");
     div.className = "player-row";
-    div.textContent = `${p.name}: ${msg.roles[p.id]}`;
+    div.innerHTML = `<span><span class="dot" style="background:${p.color}"></span>${p.name}</span><span>${msg.roles[p.id]}</span>`;
     rolesEl.appendChild(div);
   });
   $("#restart-btn").style.display = isHost ? "block" : "none";
 }
+
+function renderHostDashboard(msg) {
+  if (!isHost) return;
+  const inActiveGame = msg.state === "playing" || msg.state === "meeting";
+  if (!inActiveGame) show("#screen-host");
+  const summary = $("#host-summary");
+  const stateLabel = msg.state === "ended"
+    ? `Game over — ${msg.winner} win`
+    : msg.state === "lobby"
+      ? "Lobby — waiting for players"
+      : `Game state: ${msg.state}`;
+  summary.textContent = stateLabel + (msg.sabotage_active ? ` · SABOTAGE: ${msg.sabotage_active.kind}` : "");
+
+  const startBtn = $("#host-start-btn");
+  startBtn.style.display = msg.state === "lobby" ? "block" : "none";
+  if (msg.state === "lobby") {
+    startBtn.disabled = msg.players.length < 4;
+    startBtn.textContent = msg.players.length < 4
+      ? `Start game (need ${4 - msg.players.length} more)`
+      : "Start game";
+  }
+  $("#host-restart-btn").style.display = msg.state === "lobby" ? "none" : "block";
+
+  const lobbyList = $("#host-ready");
+  if (lobbyList) lobbyList.style.display = msg.state === "lobby" ? "block" : "none";
+  const tableWrap = $("#host-table-wrap");
+  if (tableWrap) tableWrap.style.display = msg.state === "lobby" ? "none" : "block";
+
+  if (msg.state === "lobby") {
+    if (lobbyList) renderHostReady(msg.players);
+    return;
+  }
+
+  const tbody = $("#host-rows");
+  tbody.innerHTML = "";
+  msg.players.forEach(p => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><span class="dot" style="background:${p.color}"></span>${p.name}</td>
+      <td class="role-${p.role}">${p.role}</td>
+      <td>${p.alive ? p.room : "—"}</td>
+      <td>${p.alive ? "yes" : "no"}</td>
+      <td>${p.stats.attempted} / ${p.target || "—"}</td>
+      <td>${p.stats.correct}</td>
+      <td>${p.stats.incorrect}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  renderHostRooms(msg);
+}
+
+function renderHostReady(players) {
+  const el = $("#host-ready");
+  if (!el) return;
+  el.innerHTML = "";
+  if (!players.length) {
+    el.innerHTML = `<div class="hint">No one in the lobby yet. Share the URL so people can join.</div>`;
+    return;
+  }
+  const ul = document.createElement("ul");
+  ul.className = "ready-list";
+  players.forEach(p => {
+    const li = document.createElement("li");
+    li.innerHTML = `<span class="dot" style="background:${p.color}"></span>${p.name}`;
+    ul.appendChild(li);
+  });
+  el.appendChild(ul);
+  const prev = document.createElement("div");
+  prev.className = "hint";
+  prev.textContent = `${players.length} ready`;
+  el.appendChild(prev);
+}
+
+function renderHostRooms(msg) {
+  const el = $("#host-rooms");
+  if (!el) return;
+  el.innerHTML = "";
+  const alive = msg.players.filter(p => p.alive);
+  if (!alive.length) { el.textContent = "No players."; return; }
+  const groups = {};
+  alive.forEach(p => {
+    (groups[p.room] = groups[p.room] || []).push(p);
+  });
+  Object.entries(groups).forEach(([room, list]) => {
+    const line = document.createElement("div");
+    line.className = "host-room-line";
+    const names = list.map(p =>
+      `<span class="dot" style="background:${p.color}"></span>${p.name}`
+    ).join("");
+    line.innerHTML = `<span class="room-tag">${room}</span>${names}`;
+    el.appendChild(line);
+  });
+}
+
+buildColorWheel();

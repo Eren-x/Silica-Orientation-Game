@@ -13,22 +13,44 @@
   <section id="screen-join" class="screen active">
     <h1>Traitor Engineer</h1>
     <p class="subtitle">Prototype build</p>
-    <input id="name-input" maxlength="16" placeholder="Your name">
-    <button id="join-btn">Join lobby</button>
+
+    <div class="join-cards">
+      <div class="join-card">
+        <h2>Join as player</h2>
+        <input id="p-name" maxlength="16" placeholder="Your name">
+        <p class="hint">Pick your colour</p>
+        <div id="color-wheel" class="color-wheel"></div>
+        <button id="join-btn">Join game</button>
+        <div id="join-error" class="inline-error hidden"></div>
+      </div>
+
+      <div class="join-card host-card">
+        <h2>Host a game</h2>
+        <input id="h-name" maxlength="16" placeholder="Host name">
+        <input id="h-password" type="password" placeholder="Host password">
+        <button id="host-join-btn">Start hosting</button>
+        <div id="host-error" class="inline-error hidden"></div>
+      </div>
+    </div>
   </section>
 
   <section id="screen-lobby" class="screen">
     <h2>Lobby</h2>
     <ul id="lobby-players"></ul>
     <p id="lobby-hint" class="hint">Need at least 4 players to start.</p>
-    <button id="start-btn" style="display:none">Start game</button>
   </section>
 
   <section id="screen-game" class="screen">
     <div id="hud">
       <div id="role-badge"></div>
-      <div id="task-progress"></div>
+      <div id="color-chip"></div>
+        <div id="progress-pill">You: 0/3</div>
       <div id="sabotage-banner" class="hidden"></div>
+    </div>
+
+    <div id="minimap-panel">
+      <h3>Map</h3>
+      <div id="minimap"></div>
     </div>
 
     <div id="room-panel">
@@ -41,15 +63,21 @@
       <div id="player-list"></div>
     </div>
 
-    <div id="task-panel" class="hidden">
-      <h3>Your tasks</h3>
-      <div id="task-list"></div>
+    <div id="question-panel" class="hidden">
+      <h3>Active question</h3>
+      <div class="timer-bar"><div id="timer-fill"></div></div>
+      <div id="timer-label">10.0s</div>
+      <div id="question-card"></div>
     </div>
 
     <div id="traitor-panel" class="hidden">
       <h3>Traitor tools</h3>
       <button id="sabotage-btn">Trigger sabotage</button>
       <button id="kill-btn">Kill someone in your room</button>
+    </div>
+
+    <div id="toggle-row" class="hidden">
+      <button id="toggle-view">Switch to tools</button>
     </div>
 
     <div id="actions-panel">
@@ -72,9 +100,29 @@
     <button id="restart-btn" style="display:none">Back to lobby</button>
   </section>
 
+  <section id="screen-host" class="screen">
+    <h2>Host dashboard</h2>
+    <div id="host-summary" class="hint"></div>
+    <div id="host-ready"></div>
+    <div id="host-rooms" class="host-rooms"></div>
+    <div id="host-table-wrap">
+      <table id="host-table">
+        <thead>
+          <tr><th>Player</th><th>Role</th><th>Room</th><th>Alive</th><th>Attempted</th><th>Correct</th><th>Incorrect</th></tr>
+        </thead>
+        <tbody id="host-rows"></tbody>
+      </table>
+    </div>
+    <div id="host-actions">
+      <button id="host-start-btn">Start game</button>
+      <button id="host-restart-btn">Back to lobby</button>
+    </div>
+    <div id="host-log" class="hint"></div>
+  </section>
+
   <div id="toast"></div>
 </div>
 
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=6"></script>
 </body>
 </html>
