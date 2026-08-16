@@ -50,6 +50,7 @@ let myRole = null;
 let myTarget = 3;
 let isHost = false;
 let lastJoinAttempt = null;
+let reconnectAttempts = 0;
 let mapLayout = {};
 let adjacentPairs = [];
 let ventPairs = [];
@@ -59,6 +60,8 @@ let myQuestion = null;
 let myDeadline = 0;
 let traitorView = "tools";
 let timerHandle = null;
+let pauseTimerHandle = null;
+let leftIntentionally = false;
 let takenColors = new Set();
 let takenNames = new Set();
 
@@ -108,11 +111,50 @@ function buildColorWheel() {
   });
 }
 
+function getClientId() {
+  let cid = sessionStorage.getItem("traitor_client_id");
+  if (!cid) {
+    cid = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    sessionStorage.setItem("traitor_client_id", cid);
+  }
+  return cid;
+}
+
+function setConnectionStatus(ok) {
+  const el = $("#conn-pill");
+  if (!el) return;
+  el.textContent = ok ? "● connected" : "◌ reconnecting";
+  el.className = "conn-pill " + (ok ? "up" : "down");
+}
+
+function buildJoinPayload() {
+  const payload = { type: "join", name: myName, color: myColor, client_id: getClientId() };
+  if (lastJoinAttempt === "host") {
+    payload.as_host = true;
+    payload.password = $("#h-password").value;
+  }
+  return payload;
+}
+
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.onmessage = (ev) => handleMessage(JSON.parse(ev.data));
-  ws.onclose = () => toast("Disconnected from server");
+  ws.onopen = () => {
+    setConnectionStatus(true);
+    if (lastJoinAttempt) ws.send(JSON.stringify(buildJoinPayload()));
+  };
+  ws.onclose = () => {
+    setConnectionStatus(false);
+    if (leftIntentionally) return;
+    if (lastJoinAttempt && reconnectAttempts < 5) {
+      reconnectAttempts += 1;
+      toast("Connection lost — reconnecting…");
+      setTimeout(connect, 1000);
+      return;
+    }
+    toast("Disconnected from server");
+  };
 }
 
 function tryJoin(asHost) {
@@ -126,20 +168,79 @@ function tryJoin(asHost) {
     return;
   }
   myName = name;
+  leftIntentionally = false;
   lastJoinAttempt = asHost ? "host" : "player";
+  reconnectAttempts = 0;
   connect();
-  ws.onopen = () => {
-    const payload = { type: "join", name, color: myColor };
-    if (asHost) {
-      payload.as_host = true;
-      payload.password = $("#h-password").value;
+}
+
+function resetToJoin() {
+  if (timerHandle) clearInterval(timerHandle);
+  timerHandle = null;
+  if (pauseTimerHandle) clearInterval(pauseTimerHandle);
+  pauseTimerHandle = null;
+  myId = null;
+  isHost = false;
+  myRole = null;
+  latestPlayers = [];
+  myQuestion = null;
+  lastJoinAttempt = null;
+  reconnectAttempts = 5;
+  leftIntentionally = true;
+  hidePauseOverlay();
+  show("#screen-join");
+  buildColorWheel();
+}
+
+function leaveGame(confirmLeave) {
+  if (confirmLeave && !confirm("Leave the game? You cannot rejoin this round.")) return;
+  leftIntentionally = true;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "leave" }));
+  }
+  resetToJoin();
+}
+
+function endGame() {
+  if (!confirm("End the game for everyone? Everyone will return to the join screen.")) return;
+  leftIntentionally = true;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "end_game" }));
+  }
+}
+
+function showPauseOverlay(deadline) {
+  const overlay = $("#pause-overlay");
+  if (!overlay) return;
+  overlay.classList.add("visible");
+  if (pauseTimerHandle) clearInterval(pauseTimerHandle);
+  const update = () => {
+    const left = Math.max(0, (deadline || 0) - Date.now() / 1000);
+    const count = $("#pause-count");
+    if (count) count.textContent = Math.ceil(left) + "s";
+    if (left <= 0) {
+      clearInterval(pauseTimerHandle);
+      pauseTimerHandle = null;
     }
-    ws.send(JSON.stringify(payload));
   };
+  update();
+  pauseTimerHandle = setInterval(update, 500);
+}
+
+function hidePauseOverlay() {
+  if (pauseTimerHandle) clearInterval(pauseTimerHandle);
+  pauseTimerHandle = null;
+  const overlay = $("#pause-overlay");
+  if (overlay) overlay.classList.remove("visible");
 }
 
 $("#join-btn").onclick = () => tryJoin(false);
 $("#host-join-btn").onclick = () => tryJoin(true);
+
+$("#leave-lobby-btn").onclick = () => leaveGame(false);
+document.querySelectorAll(".leave-game").forEach(b => b.onclick = () => leaveGame(true));
+$("#end-game-btn").onclick = () => endGame();
+$("#host-leave-btn").onclick = () => leaveGame(false);
 
 $("#start-btn") && ($("#start-btn").onclick = () => ws.send(JSON.stringify({ type: "start_game" })));
 $("#restart-btn").onclick = () => ws.send(JSON.stringify({ type: "restart" }));
@@ -186,9 +287,10 @@ function handleMessage(msg) {
     case "joined":
       myId = msg.your_id;
       isHost = !!msg.is_host;
+      reconnectAttempts = 0;
       if (isHost) {
         show("#screen-host");
-      } else {
+      } else if (!msg.reconnected) {
         show("#screen-lobby");
       }
       break;
@@ -206,10 +308,17 @@ function handleMessage(msg) {
         }
       }
       break;
-    case "you_are_host":
-      isHost = true;
-      toast("You are now the host");
-      if (!msg.active) show("#screen-host");
+    case "host_disconnected":
+      toast("Host disconnected — game paused");
+      showPauseOverlay(msg.deadline);
+      break;
+    case "host_rejoined":
+      toast("Host is back — game resumed");
+      hidePauseOverlay();
+      break;
+    case "session_ended":
+      toast(msg.reason || "Session ended");
+      resetToJoin();
       break;
     case "game_started":
       myRole = msg.your_role;
@@ -241,6 +350,11 @@ function handleMessage(msg) {
       renderMinimap(msg);
       renderRooms(msg.rooms);
       renderPlayers(msg.players);
+      if (msg.host_pending) {
+        showPauseOverlay(msg.host_deadline);
+      } else {
+        hidePauseOverlay();
+      }
       if (msg.state === "meeting") show("#screen-meeting");
       else if (msg.state === "playing" && document.querySelector("#screen-meeting").classList.contains("active")) {
         show("#screen-game");
@@ -590,12 +704,14 @@ function renderHostDashboard(msg) {
   if (!isHost) return;
   const inActiveGame = msg.state === "playing" || msg.state === "meeting";
   if (!inActiveGame) show("#screen-host");
+  renderHostLive(msg);
   const summary = $("#host-summary");
+  const playerCount = msg.players.length;
   const stateLabel = msg.state === "ended"
-    ? `Game over — ${msg.winner} win`
+    ? `Game over — ${msg.winner} win · ${playerCount} players`
     : msg.state === "lobby"
-      ? "Lobby — waiting for players"
-      : `Game state: ${msg.state}`;
+      ? `Lobby — ${playerCount} player${playerCount === 1 ? "" : "s"} ready (need 4 to start)`
+      : `Game state: ${msg.state} · ${playerCount} player${playerCount === 1 ? "" : "s"}`;
   summary.textContent = stateLabel + (msg.sabotage_active ? ` · SABOTAGE: ${msg.sabotage_active.kind}` : "");
 
   const startBtn = $("#host-start-btn");
@@ -607,6 +723,8 @@ function renderHostDashboard(msg) {
       : "Start game";
   }
   $("#host-restart-btn").style.display = msg.state === "lobby" ? "none" : "block";
+  $("#end-game-btn").style.display = msg.state === "lobby" ? "none" : "block";
+  $("#host-leave-btn").style.display = msg.state === "lobby" ? "block" : "none";
 
   const lobbyList = $("#host-ready");
   if (lobbyList) lobbyList.style.display = msg.state === "lobby" ? "block" : "none";
@@ -635,6 +753,26 @@ function renderHostDashboard(msg) {
   });
 
   renderHostRooms(msg);
+}
+
+function renderHostLive(msg) {
+  const el = $("#host-live");
+  if (!el) return;
+  const connected = msg.players || [];
+  const disconnected = msg.disconnected || [];
+  let html = `<div class="live-line"><span class="live-dot up">●</span><b>${connected.length} connected:</b> `;
+  if (connected.length) {
+    html += connected.map(p => `<span class="live-name"><span class="dot" style="background:${p.color}"></span>${p.name}</span>`).join("");
+  } else {
+    html += `<span class="muted">none</span>`;
+  }
+  html += "</div>";
+  if (disconnected.length) {
+    html += `<div class="live-line"><span class="live-dot down">●</span><b>${disconnected.length} disconnected:</b> `;
+    html += disconnected.map(d => `<span class="live-name"><span class="dot" style="background:${d.color};opacity:.45"></span>${d.name}</span>`).join("");
+    html += "</div>";
+  }
+  el.innerHTML = html;
 }
 
 function renderHostReady(players) {

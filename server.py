@@ -10,6 +10,7 @@ Then open http://localhost:8000 in a browser tab per player.
 
 import asyncio
 import json
+import os
 import random
 import string
 import time
@@ -69,11 +70,12 @@ HOST_PASSWORD = "1234"
 QUESTIONS_PER_ENGINEER = 3
 QUESTION_SECONDS = 10
 QUESTION_AFTER_ANSWER_DELAY = 0.0
-DISCUSSION_SECONDS = 45
-VOTING_SECONDS = 20
+DISCUSSION_SECONDS = int(os.environ.get("SILICA_DISCUSSION_SECONDS", "45"))
+VOTING_SECONDS = int(os.environ.get("SILICA_VOTING_SECONDS", "20"))
 SABOTAGE_COOLDOWN = 25
 SABOTAGE_DURATION = 15
 KILL_COOLDOWN = 20
+HOST_PAUSE_SECONDS = int(os.environ.get("SILICA_HOST_PAUSE_SECONDS", "60"))
 
 TASK_TYPES = ["logic_gate", "binary_decode"]
 
@@ -116,11 +118,12 @@ def public_task(task: dict) -> dict:
 
 
 class Player:
-    def __init__(self, pid: str, ws: WebSocket, name: str, color: str):
+    def __init__(self, pid: str, ws: WebSocket, name: str, color: str, client_id: str = ""):
         self.id = pid
         self.ws = ws
         self.name = name
         self.color = color
+        self.client_id = client_id
         self.role = "engineer"
         self.alive = True
         self.room = "Admin / Security"
@@ -157,20 +160,37 @@ class Game:
     def __init__(self):
         self.reset()
 
-    def reset(self):
+    def reset(self, keep_host: bool = False):
         existing = list(self.players.values()) if hasattr(self, "players") else []
         existing += [self.host] if getattr(self, "host", None) else []
         for p in existing:
             if p and p.question_timeout_task and not p.question_timeout_task.done():
                 p.question_timeout_task.cancel()
+        host_timeout = getattr(self, "host_timeout_task", None)
+        if host_timeout and not host_timeout.done():
+            host_timeout.cancel()
+        host = self.host if keep_host else None
         self.players: dict[str, Player] = {}
-        self.host: Optional[Player] = None
+        self.host = None
         self.state = "lobby"
         self.sabotage_active: Optional[dict] = None
         self.last_sabotage_time = 0.0
         self.meeting: Optional[dict] = None
         self.winner: Optional[str] = None
         self.next_task_id = 1
+        self.recent_leavers: list = getattr(self, "recent_leavers", [])
+        self.disconnected_players: dict[str, Player] = {}
+        self.retired_host_cid: Optional[str] = None
+        self.host_pending: bool = False
+        self.host_deadline: Optional[float] = None
+        self.host_timeout_task: Optional[asyncio.Task] = None
+        self.host = host
+
+    def find_by_client_id(self, client_id: str):
+        for p in self.players.values():
+            if p.client_id and p.client_id == client_id:
+                return p
+        return self.disconnected_players.get(client_id)
 
     def alive_players(self):
         return [p for p in self.players.values() if p.alive]
@@ -192,7 +212,7 @@ def gen_id():
 async def broadcast(msg: dict, exclude: Optional[str] = None):
     dead = []
     payload = json.dumps(msg)
-    for pid, p in game.players.items():
+    for pid, p in list(game.players.items()):
         if pid == exclude:
             continue
         try:
@@ -200,7 +220,13 @@ async def broadcast(msg: dict, exclude: Optional[str] = None):
         except Exception:
             dead.append(pid)
     for pid in dead:
-        game.players.pop(pid, None)
+        p = game.players.pop(pid, None)
+        if p:
+            await cancel_question(p)
+            if p.client_id:
+                game.disconnected_players[p.client_id] = p
+            game.recent_leavers.append({"client_id": p.client_id, "name": p.name, "color": p.color, "left_at": time.time()})
+            print(f"[SERVER] send failed -> dropped {p.name}", flush=True)
 
 
 async def send(pid: str, msg: dict):
@@ -210,7 +236,29 @@ async def send(pid: str, msg: dict):
     try:
         await p.ws.send_text(json.dumps(msg))
     except Exception:
-        pass
+        if game.host and game.host.id == p.id:
+            game.recent_leavers.append({"client_id": p.client_id, "name": p.name, "color": p.color, "left_at": time.time()})
+            print(f"[SERVER] send failed -> host dropped {p.name}", flush=True)
+            game.host = None
+            return
+        if p.id in game.players:
+            game.players.pop(p.id)
+            await cancel_question(p)
+            if p.client_id:
+                game.disconnected_players[p.client_id] = p
+            game.recent_leavers.append({"client_id": p.client_id, "name": p.name, "color": p.color, "left_at": time.time()})
+            print(f"[SERVER] send failed -> dropped {p.name}", flush=True)
+
+
+def recent_leavers():
+    now = time.time()
+    keep = [l for l in game.recent_leavers if now - l["left_at"] < 30]
+    connected = {p.client_id for p in game.players.values() if p.client_id}
+    if game.host and game.host.client_id:
+        connected.add(game.host.client_id)
+    keep = [l for l in keep if l.get("client_id") not in connected]
+    game.recent_leavers = keep
+    return keep
 
 
 def lobby_state():
@@ -225,7 +273,7 @@ def lobby_state():
 async def broadcast_lobby():
     state = lobby_state()
     await broadcast(state)
-    if game.host:
+    if game.host and game.host.id:
         await send(game.host.id, state)
         await send(game.host.id, host_state())
 
@@ -239,6 +287,8 @@ def public_state():
         "map_layout": ROOM_POSITIONS,
         "adjacent": ADJACENT_PAIRS,
         "sabotage_active": game.sabotage_active,
+        "host_pending": game.host_pending,
+        "host_deadline": game.host_deadline,
     }
 
 
@@ -262,7 +312,27 @@ def host_state():
         "map_layout": ROOM_POSITIONS,
         "adjacent": ADJACENT_PAIRS,
         "players": [p.host_view() for p in game.players.values()],
+        "disconnected": recent_leavers(),
+        "host_pending": game.host_pending,
+        "host_deadline": game.host_deadline,
     }
+
+
+async def resend_game_state(player: Player):
+    await send(player.id, {
+        "type": "game_started",
+        "your_id": player.id,
+        "your_role": player.role,
+        "your_color": player.color,
+        "your_target": player.target_questions,
+        "rooms": ROOMS,
+        "map_layout": ROOM_POSITIONS,
+        "adjacent": ADJACENT_PAIRS,
+        "vent_pairs": VENT_PAIRS if player.role == "traitor" else [],
+    })
+    await send(player.id, public_state())
+    if player.role == "engineer" and player.alive:
+        await issue_question(player)
 
 
 async def cancel_question(player: Player):
@@ -275,6 +345,8 @@ async def cancel_question(player: Player):
 
 async def issue_question(player: Player):
     if not player.alive or game.state != "playing":
+        return
+    if game.host_pending:
         return
     if player.role != "engineer":
         return
@@ -374,7 +446,7 @@ async def check_win():
 
 
 async def end_game(winner: str, reason: str):
-    for p in game.players.values():
+    for p in list(game.players.values()):
         await cancel_question(p)
     game.state = "ended"
     game.winner = winner
@@ -382,14 +454,14 @@ async def end_game(winner: str, reason: str):
         "type": "game_over",
         "winner": winner,
         "reason": reason,
-        "roles": {p.id: p.role for p in game.players.values()},
+        "roles": {p.id: p.role for p in list(game.players.values())},
     }
     await broadcast(payload)
     await broadcast_host_state()
 
 
 async def start_meeting(reason: str, caller_id: str):
-    for p in game.players.values():
+    for p in list(game.players.values()):
         await cancel_question(p)
     game.state = "meeting"
     game.meeting = {
@@ -413,13 +485,25 @@ async def meeting_timer():
     m = game.meeting
     if not m:
         return
-    await asyncio.sleep(DISCUSSION_SECONDS)
+    remaining = m["ends_at"] - time.time()
+    while remaining > 0 and game.meeting is m and game.state == "meeting":
+        if game.host_pending:
+            await asyncio.sleep(0.5)
+            continue
+        await asyncio.sleep(min(1.0, remaining))
+        remaining = m["ends_at"] - time.time()
     if game.meeting is not m or game.state != "meeting":
         return
     m["phase"] = "voting"
     m["ends_at"] = time.time() + VOTING_SECONDS
     await broadcast({"type": "voting_started", "voting_seconds": VOTING_SECONDS})
-    await asyncio.sleep(VOTING_SECONDS)
+    remaining = m["ends_at"] - time.time()
+    while remaining > 0 and game.meeting is m and game.state == "meeting":
+        if game.host_pending:
+            await asyncio.sleep(0.5)
+            continue
+        await asyncio.sleep(min(1.0, remaining))
+        remaining = m["ends_at"] - time.time()
     if game.meeting is not m or game.state != "meeting":
         return
     await resolve_votes()
@@ -454,6 +538,109 @@ async def resolve_votes():
     await check_win()
 
 
+async def pause_for_host_rejoin():
+    if game.host_pending:
+        return
+    for p in list(game.players.values()):
+        await cancel_question(p)
+    game.host_pending = True
+    game.host_deadline = time.time() + HOST_PAUSE_SECONDS
+    print(f"[SERVER] host disconnected mid-game -> paused for {HOST_PAUSE_SECONDS}s", flush=True)
+    await broadcast({
+        "type": "host_disconnected",
+        "deadline": game.host_deadline,
+        "seconds": HOST_PAUSE_SECONDS,
+    })
+    await broadcast_state()
+    game.host_timeout_task = asyncio.create_task(host_timeout())
+
+
+async def host_timeout():
+    deadline = game.host_deadline or 0.0
+    try:
+        await asyncio.sleep(max(0.0, deadline - time.time()))
+    except asyncio.CancelledError:
+        return
+    if not game.host_pending or game.host is not None:
+        return
+    print("[SERVER] host did not rejoin in time -> ending session", flush=True)
+    await end_session("Host did not rejoin in time")
+
+
+async def end_session(reason: str):
+    if game.host_timeout_task and not game.host_timeout_task.done():
+        game.host_timeout_task.cancel()
+    game.host_timeout_task = None
+    game.host_pending = False
+    game.host_deadline = None
+    for p in list(game.players.values()):
+        await cancel_question(p)
+    payload = {"type": "session_ended", "reason": reason}
+    await broadcast(payload)
+    if game.host:
+        await send(game.host.id, payload)
+    print(f"[SERVER] session ended: {reason}", flush=True)
+    game.reset()
+
+
+async def resume_questions():
+    if game.state != "playing":
+        return
+    for p in game.players.values():
+        if p.role == "engineer" and p.alive:
+            await issue_question(p)
+
+
+async def remove_player(pid: str, voluntary: bool = False):
+    host_left = False
+    if game.host and game.host.id == pid:
+        host_left = True
+        host = game.host
+        game.host = None
+        if voluntary:
+            game.retired_host_cid = None
+            game.disconnected_players.pop(host.client_id, None)
+        else:
+            game.retired_host_cid = host.client_id
+            if host.client_id:
+                game.disconnected_players[host.client_id] = host
+        game.recent_leavers.append({"client_id": host.client_id, "name": host.name, "color": host.color, "left_at": time.time()})
+        print(f"[SERVER] host left: {host.name} (voluntary={voluntary})", flush=True)
+
+    if pid in game.players:
+        p = game.players.pop(pid)
+        await cancel_question(p)
+        if voluntary:
+            game.disconnected_players.pop(p.client_id, None)
+        elif p.client_id:
+            game.disconnected_players[p.client_id] = p
+        game.recent_leavers.append({"client_id": p.client_id, "name": p.name, "color": p.color, "left_at": time.time()})
+        print(f"[SERVER] {p.name} left (voluntary={voluntary}, players={len(game.players)})", flush=True)
+
+    if not game.players:
+        if game.host is None:
+            game.reset()
+        else:
+            game.reset(keep_host=True)
+        await broadcast_lobby()
+        return
+
+    if game.state == "lobby":
+        await broadcast_lobby()
+        return
+
+    if host_left and game.host is None:
+        if voluntary:
+            await end_session("The host left the game")
+        else:
+            await pause_for_host_rejoin()
+        return
+
+    await broadcast_state()
+    if game.state == "playing":
+        await check_win()
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
@@ -467,14 +654,87 @@ async def ws_endpoint(ws: WebSocket):
             mtype = msg.get("type")
 
             if mtype == "join":
-                if game.state != "lobby" and game.players:
+                client_id = msg.get("client_id") or ""
+                name = (msg.get("name") or "Player")[:16]
+                color = msg.get("color") if msg.get("color") in PLAYER_COLORS else PLAYER_COLORS[0]
+                as_host = bool(msg.get("as_host"))
+                existing = game.find_by_client_id(client_id) if client_id else None
+                if existing is None and game.host and game.host.client_id and game.host.client_id == client_id:
+                    existing = game.host
+                is_reconnect = existing is not None
+
+                if game.state != "lobby" and game.players and not is_reconnect:
                     await send_to_ws(ws, {"type": "error", "message": "Game already in progress"})
                     continue
                 if game.state != "lobby" and not game.players:
                     game.reset()
-                name = (msg.get("name") or "Player")[:16]
-                color = msg.get("color") if msg.get("color") in PLAYER_COLORS else PLAYER_COLORS[0]
-                as_host = bool(msg.get("as_host"))
+
+                if as_host and is_reconnect and existing.client_id == game.retired_host_cid and game.host is None:
+                    if game.host_timeout_task and not game.host_timeout_task.done():
+                        game.host_timeout_task.cancel()
+                    game.host_timeout_task = None
+                    resumed = game.host_pending
+                    game.host_pending = False
+                    game.host_deadline = None
+                    game.retired_host_cid = None
+                    game.disconnected_players.pop(client_id, None)
+                    player = Player(pid, ws, existing.name, existing.color, client_id)
+                    player.host = True
+                    player.target_questions = 0
+                    game.host = player
+                    print(f"[SERVER] host reclaimed, game {'resumed' if resumed else 'back to lobby'} (host_pending={resumed}): {player.name}", flush=True)
+                    await send_to_ws(ws, {"type": "joined", "your_id": pid, "is_host": True, "reconnected": True})
+                    await broadcast_host_state()
+                    if resumed:
+                        await broadcast({"type": "host_rejoined"})
+                        await broadcast_state()
+                        print(f"[SERVER] calling resume_questions, state={game.state}, alive_eng={len([p for p in game.players.values() if p.role=='engineer' and p.alive])}", flush=True)
+                        await resume_questions()
+                    else:
+                        await broadcast_lobby()
+                    continue
+
+                if as_host and game.host_pending:
+                    await send_to_ws(ws, {"type": "error", "message": "Host disconnected - the game is paused"})
+                    continue
+
+                if is_reconnect:
+                    if existing is game.host:
+                        if not as_host:
+                            await send_to_ws(ws, {"type": "error", "message": "Host identity cannot join as a player"})
+                            continue
+                        player = Player(pid, ws, existing.name, existing.color, client_id)
+                        player.host = True
+                        player.target_questions = 0
+                        game.host = player
+                        print(f"[SERVER] host reconnected: {player.name}", flush=True)
+                        await send_to_ws(ws, {"type": "joined", "your_id": pid, "is_host": True, "reconnected": True})
+                        await broadcast_lobby()
+                        continue
+                    if not as_host and game.host_pending and existing.client_id == game.retired_host_cid:
+                        await send_to_ws(ws, {"type": "error", "message": "Host identity cannot join as a player"})
+                        continue
+                    await cancel_question(existing)
+                    if existing.id in game.players:
+                        del game.players[existing.id]
+                    game.disconnected_players.pop(client_id, None)
+                    print(f"[SERVER] {existing.name} reconnected (replaced stale entry)", flush=True)
+                    player = Player(pid, ws, existing.name, existing.color, client_id)
+                    player.role = existing.role
+                    player.alive = existing.alive
+                    player.room = existing.room
+                    player.target_questions = existing.target_questions
+                    player.stats = existing.stats
+                    player.last_kill_time = existing.last_kill_time
+                    game.players[pid] = player
+                    await send_to_ws(ws, {"type": "joined", "your_id": pid, "is_host": False, "reconnected": True})
+                    if game.state in ("lobby", "ended"):
+                        await broadcast_lobby()
+                    else:
+                        await resend_game_state(player)
+                        await broadcast_host_state()
+                    continue
+
                 taken_names = {p.name.lower() for p in game.players.values()}
                 taken_colors = {p.color for p in game.players.values()}
                 if not as_host:
@@ -485,21 +745,29 @@ async def ws_endpoint(ws: WebSocket):
                         await send_to_ws(ws, {"type": "error", "message": "That colour is already taken"})
                         continue
                 if as_host:
+                    if game.host_pending:
+                        await send_to_ws(ws, {"type": "error", "message": "Host disconnected - the game is paused"})
+                        continue
                     if game.host is not None:
                         await send_to_ws(ws, {"type": "error", "message": "A host already exists"})
                         continue
                     if msg.get("password") != HOST_PASSWORD:
                         await send_to_ws(ws, {"type": "error", "message": "Wrong host password"})
                         continue
-                    player = Player(pid, ws, name, color)
+                    if not game.players:
+                        game.recent_leavers = []
+                    game.retired_host_cid = None
+                    player = Player(pid, ws, name, color, client_id)
                     player.host = True
                     player.target_questions = 0
                     game.host = player
+                    print(f"[SERVER] host joined: {name}", flush=True)
                     await send_to_ws(ws, {"type": "joined", "your_id": pid, "is_host": True})
                     await broadcast_lobby()
                     continue
-                player = Player(pid, ws, name, color)
+                player = Player(pid, ws, name, color, client_id)
                 game.players[pid] = player
+                print(f"[SERVER] {name} joined (players={len(game.players)})", flush=True)
                 await send_to_ws(ws, {"type": "joined", "your_id": pid, "is_host": False})
                 await broadcast_lobby()
                 continue
@@ -517,7 +785,7 @@ async def ws_endpoint(ws: WebSocket):
                 else:
                     await start_game()
 
-            elif mtype == "move_room" and game.state == "playing" and player.alive:
+            elif mtype == "move_room" and game.state == "playing" and player.alive and not game.host_pending:
                 room = msg.get("room")
                 if room in ROOMS:
                     player.room = room
@@ -527,7 +795,7 @@ async def ws_endpoint(ws: WebSocket):
                     else:
                         await send_to_ws(ws, {"type": "question", "question": None, "deadline": 0, "seconds": 0})
 
-            elif mtype == "vent" and game.state == "playing" and player.alive and player.role == "traitor":
+            elif mtype == "vent" and game.state == "playing" and player.alive and player.role == "traitor" and not game.host_pending:
                 target_room = msg.get("room")
                 valid_targets = set()
                 for a, b in VENT_PAIRS:
@@ -539,7 +807,7 @@ async def ws_endpoint(ws: WebSocket):
                     player.room = target_room
                     await broadcast_state()
 
-            elif mtype == "do_task" and game.state == "playing" and player.alive:
+            elif mtype == "do_task" and game.state == "playing" and player.alive and not game.host_pending:
                 if player.current_question is None:
                     continue
                 task_id = msg.get("task_id")
@@ -571,7 +839,7 @@ async def ws_endpoint(ws: WebSocket):
                     if player.stats["correct"] < player.target_questions:
                         await issue_question(player)
 
-            elif mtype == "sabotage" and game.state == "playing" and player.alive and player.role == "traitor":
+            elif mtype == "sabotage" and game.state == "playing" and player.alive and player.role == "traitor" and not game.host_pending:
                 now = time.time()
                 if game.sabotage_active:
                     await send_to_ws(ws, {"type": "error", "message": "A sabotage is already active"})
@@ -584,7 +852,7 @@ async def ws_endpoint(ws: WebSocket):
                     await broadcast_state()
                     asyncio.create_task(clear_sabotage_after(SABOTAGE_DURATION))
 
-            elif mtype == "kill" and game.state == "playing" and player.alive and player.role == "traitor":
+            elif mtype == "kill" and game.state == "playing" and player.alive and player.role == "traitor" and not game.host_pending:
                 now = time.time()
                 if now - player.last_kill_time < KILL_COOLDOWN:
                     await send_to_ws(ws, {"type": "error", "message": "Kill on cooldown"})
@@ -598,16 +866,16 @@ async def ws_endpoint(ws: WebSocket):
                         await broadcast_state()
                         await check_win()
 
-            elif mtype == "report_body" and game.state == "playing" and player.alive:
+            elif mtype == "report_body" and game.state == "playing" and player.alive and not game.host_pending:
                 target_id = msg.get("target_id")
                 target = game.players.get(target_id)
                 if target and not target.alive:
                     await start_meeting(f"{player.name} reported {target.name}'s body", pid)
 
-            elif mtype == "call_meeting" and game.state == "playing" and player.alive:
+            elif mtype == "call_meeting" and game.state == "playing" and player.alive and not game.host_pending:
                 await start_meeting(f"{player.name} called an emergency meeting", pid)
 
-            elif mtype == "vote" and game.state == "meeting" and player.alive:
+            elif mtype == "vote" and game.state == "meeting" and player.alive and not game.host_pending:
                 if game.meeting and game.meeting["phase"] == "voting":
                     game.meeting["votes"][pid] = msg.get("target_id", "skip")
                     await broadcast({
@@ -627,30 +895,18 @@ async def ws_endpoint(ws: WebSocket):
                     await send_to_ws(game.host.ws, {"type": "joined", "your_id": game.host.id, "is_host": True})
                 await broadcast_lobby()
 
+            elif mtype == "leave":
+                await remove_player(pid, voluntary=True)
+                await send_to_ws(ws, {"type": "session_ended", "reason": "You left"})
+
+            elif mtype == "end_game" and player.host:
+                if game.state == "lobby":
+                    await send_to_ws(ws, {"type": "error", "message": "No game in progress"})
+                else:
+                    await end_session("The host ended the game")
+
     except WebSocketDisconnect:
-        if game.host and game.host.id == pid:
-            game.host = None
-        if pid in game.players:
-            p = game.players.pop(pid)
-            await cancel_question(p)
-        if not game.players:
-            game.reset()
-            return
-        if game.host is None and game.players:
-            new_host = next(iter(game.players.values()))
-            new_host.host = True
-            game.host = new_host
-            active = game.state not in ("lobby", "ended")
-            await send(new_host.id, {
-                "type": "you_are_host",
-                "active": active,
-            })
-        if game.state == "lobby":
-            await broadcast_lobby()
-        else:
-            await broadcast_state()
-            if game.state == "playing":
-                await check_win()
+        await remove_player(pid)
 
 
 async def send_to_ws(ws, msg: dict):
@@ -661,13 +917,19 @@ async def send_to_ws(ws, msg: dict):
 
 
 async def clear_sabotage_after(seconds: float):
-    await asyncio.sleep(seconds)
+    remaining = seconds
+    while remaining > 0 and game.sabotage_active:
+        if game.host_pending:
+            await asyncio.sleep(0.5)
+            continue
+        await asyncio.sleep(min(1.0, remaining))
+        remaining = game.sabotage_active["ends_at"] - time.time()
     if game.sabotage_active and game.sabotage_active["ends_at"] <= time.time() + 0.5:
         game.sabotage_active = None
         await broadcast_state()
 
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")), name="static")
 
 
 @app.get("/")

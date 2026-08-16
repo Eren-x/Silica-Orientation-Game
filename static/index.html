@@ -10,6 +10,8 @@
 
 <div id="app">
 
+  <div id="conn-pill" class="conn-pill down">◌ connecting</div>
+
   <section id="screen-join" class="screen active">
     <h1>Traitor Engineer</h1>
     <p class="subtitle">Prototype build</p>
@@ -38,6 +40,7 @@
     <h2>Lobby</h2>
     <ul id="lobby-players"></ul>
     <p id="lobby-hint" class="hint">Need at least 4 players to start.</p>
+    <button id="leave-lobby-btn">Leave lobby</button>
   </section>
 
   <section id="screen-game" class="screen">
@@ -83,6 +86,7 @@
     <div id="actions-panel">
       <button id="report-btn">Report a body</button>
       <button id="meeting-btn">Call emergency meeting</button>
+      <button class="leave-game">Leave game</button>
     </div>
   </section>
 
@@ -91,6 +95,7 @@
     <div id="meeting-timer"></div>
     <div id="meeting-players"></div>
     <div id="meeting-result"></div>
+    <button class="leave-game">Leave game</button>
   </section>
 
   <section id="screen-gameover" class="screen">
@@ -98,11 +103,13 @@
     <p id="gameover-reason"></p>
     <div id="gameover-roles"></div>
     <button id="restart-btn" style="display:none">Back to lobby</button>
+    <button class="leave-game">Leave game</button>
   </section>
 
   <section id="screen-host" class="screen">
     <h2>Host dashboard</h2>
     <div id="host-summary" class="hint"></div>
+    <div id="host-live" class="host-live"></div>
     <div id="host-ready"></div>
     <div id="host-rooms" class="host-rooms"></div>
     <div id="host-table-wrap">
@@ -116,13 +123,23 @@
     <div id="host-actions">
       <button id="host-start-btn">Start game</button>
       <button id="host-restart-btn">Back to lobby</button>
+      <button id="end-game-btn" style="display:none">End game</button>
+      <button id="host-leave-btn">Leave</button>
     </div>
     <div id="host-log" class="hint"></div>
   </section>
 
+  <div id="pause-overlay" class="pause-overlay">
+    <div class="pause-box">
+      <h2>Host disconnected</h2>
+      <p>Game paused. Waiting for the host to reconnect…</p>
+      <div id="pause-count">60s</div>
+    </div>
+  </div>
+
   <div id="toast"></div>
 </div>
 
-<script src="/static/app.js?v=6"></script>
+<script src="/static/app.js?v=8"></script>
 </body>
 </html>

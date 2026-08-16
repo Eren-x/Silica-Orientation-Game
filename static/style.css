@@ -337,4 +337,62 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 }
 #host-table th { color: var(--text-dim); font-weight: 600; }
 #host-table td.role-traitor { color: var(--danger); font-weight: 600; }
+
+.conn-pill {
+  position: fixed;
+  top: 10px;
+  right: 12px;
+  z-index: 50;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+.conn-pill.up { color: var(--success); border-color: var(--success); }
+.conn-pill.down { color: var(--danger); border-color: var(--danger); }
+
+.host-live {
+  margin: 8px 0 12px;
+  padding: 8px 10px;
+  background: var(--panel-light);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.live-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 2px 0; }
+.live-line b { color: var(--text-dim); font-weight: 600; }
+.live-dot { font-size: 10px; }
+.live-dot.up { color: var(--success); }
+.live-dot.down { color: var(--danger); }
+.live-name { display: inline-flex; align-items: center; gap: 4px; margin-right: 8px; }
+.muted { opacity: 0.5; }
 #host-table td.role-engineer { color: var(--success); }
+
+.pause-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 12, 18, 0.82);
+  backdrop-filter: blur(3px);
+}
+.pause-overlay.visible { display: flex; }
+.pause-box {
+  text-align: center;
+  padding: 32px 44px;
+  background: var(--panel);
+  border: 1px solid var(--danger);
+  border-radius: 12px;
+  max-width: 420px;
+}
+.pause-box h2 { color: var(--danger); margin-bottom: 8px; }
+.pause-box p { color: var(--text-dim); margin-bottom: 16px; }
+#pause-count {
+  font-size: 40px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
