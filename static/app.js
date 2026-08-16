@@ -61,6 +61,7 @@ let myDeadline = 0;
 let traitorView = "tools";
 let timerHandle = null;
 let pauseTimerHandle = null;
+let meetingTickerHandle = null;
 let leftIntentionally = false;
 let takenColors = new Set();
 let takenNames = new Set();
@@ -369,15 +370,16 @@ function handleMessage(msg) {
     case "meeting_started":
       show("#screen-meeting");
       $("#meeting-reason").textContent = msg.reason;
-      $("#meeting-timer").textContent = `Discussion: ${msg.discussion_seconds}s`;
+      startMeetingCountdown("Discussion", msg.discussion_seconds);
       $("#meeting-result").textContent = "";
       renderMeetingVoting(false);
       break;
     case "voting_started":
-      $("#meeting-timer").textContent = `Voting: ${msg.voting_seconds}s`;
+      startMeetingCountdown("Voting", msg.voting_seconds);
       renderMeetingVoting(true);
       break;
     case "vote_cast":
+      stopMeetingCountdown();
       $("#meeting-timer").textContent = `Votes: ${msg.num_votes}/${msg.num_alive}`;
       break;
     case "meeting_result":
@@ -635,6 +637,27 @@ function submitTask(taskId, answer) {
 }
 window.submitTask = submitTask;
 
+function startMeetingCountdown(label, seconds) {
+  if (meetingTickerHandle) clearInterval(meetingTickerHandle);
+  const endAt = Date.now() + seconds * 1000;
+  const el = $("#meeting-timer");
+  const tick = () => {
+    const left = Math.max(0, Math.ceil((endAt - Date.now()) / 1000));
+    el.textContent = `${label}: ${left}s`;
+    if (left <= 0) {
+      clearInterval(meetingTickerHandle);
+      meetingTickerHandle = null;
+    }
+  };
+  tick();
+  meetingTickerHandle = setInterval(tick, 250);
+}
+
+function stopMeetingCountdown() {
+  if (meetingTickerHandle) clearInterval(meetingTickerHandle);
+  meetingTickerHandle = null;
+}
+
 function handleTaskResult(msg) {
   let text = msg.correct ? "Correct!" : (msg.reason === "timeout" ? "Time's up!" : (msg.reason === "sabotage" ? "Blocked by sabotage" : "Incorrect"));
   toast(text);
@@ -671,6 +694,7 @@ function castVote(targetId) {
 window.castVote = castVote;
 
 function renderMeetingResult(msg) {
+  stopMeetingCountdown();
   const el = $("#meeting-result");
   if (msg.eliminated) {
     const p = latestPlayers.find(p => p.id === msg.eliminated);

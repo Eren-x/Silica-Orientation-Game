@@ -133,6 +133,9 @@ class Player:
         self.current_question: Optional[dict] = None
         self.question_deadline: float = 0.0
         self.question_timeout_task: Optional[asyncio.Task] = None
+        self.mock_question: Optional[dict] = None
+        self.mock_deadline: float = 0.0
+        self.mock_timeout_task: Optional[asyncio.Task] = None
         self.question_id_seq: int = 0
         self.last_kill_time = 0.0
 
@@ -166,6 +169,8 @@ class Game:
         for p in existing:
             if p and p.question_timeout_task and not p.question_timeout_task.done():
                 p.question_timeout_task.cancel()
+            if p and p.mock_timeout_task and not p.mock_timeout_task.done():
+                p.mock_timeout_task.cancel()
         host_timeout = getattr(self, "host_timeout_task", None)
         if host_timeout and not host_timeout.done():
             host_timeout.cancel()
@@ -223,6 +228,7 @@ async def broadcast(msg: dict, exclude: Optional[str] = None):
         p = game.players.pop(pid, None)
         if p:
             await cancel_question(p)
+            await cancel_mock_question(p)
             if p.client_id:
                 game.disconnected_players[p.client_id] = p
             game.recent_leavers.append({"client_id": p.client_id, "name": p.name, "color": p.color, "left_at": time.time()})
@@ -244,6 +250,7 @@ async def send(pid: str, msg: dict):
         if p.id in game.players:
             game.players.pop(p.id)
             await cancel_question(p)
+            await cancel_mock_question(p)
             if p.client_id:
                 game.disconnected_players[p.client_id] = p
             game.recent_leavers.append({"client_id": p.client_id, "name": p.name, "color": p.color, "left_at": time.time()})
@@ -333,6 +340,8 @@ async def resend_game_state(player: Player):
     await send(player.id, public_state())
     if player.role == "engineer" and player.alive:
         await issue_question(player)
+    elif player.role == "traitor" and player.alive:
+        await issue_mock_question(player)
 
 
 async def cancel_question(player: Player):
@@ -392,6 +401,53 @@ async def question_timeout(player: Player, qid: int, deadline: float):
     await issue_question(player)
 
 
+async def cancel_mock_question(player: Player):
+    if player.mock_timeout_task and not player.mock_timeout_task.done():
+        player.mock_timeout_task.cancel()
+    player.mock_timeout_task = None
+    player.mock_question = None
+    player.mock_deadline = 0.0
+
+
+async def issue_mock_question(player: Player):
+    if not player.alive or game.state != "playing":
+        return
+    if game.host_pending:
+        return
+    if player.role != "traitor":
+        return
+    await cancel_mock_question(player)
+    task = make_task(game.next_task_id)
+    game.next_task_id += 1
+    player.mock_question = task
+    player.mock_deadline = time.time() + QUESTION_SECONDS
+    await send(player.id, {
+        "type": "question",
+        "question": public_task(task),
+        "deadline": player.mock_deadline,
+        "seconds": QUESTION_SECONDS,
+    })
+    player.mock_timeout_task = asyncio.create_task(
+        mock_question_timeout(player, task["id"], player.mock_deadline)
+    )
+
+
+async def mock_question_timeout(player: Player, qid: int, deadline: float):
+    try:
+        await asyncio.sleep(max(0.0, deadline - time.time()))
+    except asyncio.CancelledError:
+        return
+    if game.state != "playing":
+        return
+    if not player.alive:
+        return
+    if game.host_pending:
+        return
+    if player.mock_question is None or player.mock_question["id"] != qid:
+        return
+    await issue_mock_question(player)
+
+
 async def start_game():
     players = list(game.players.values())
     n_traitors = traitor_count(len(players))
@@ -429,6 +485,8 @@ async def start_game():
     for p in players:
         if p.role == "engineer":
             await issue_question(p)
+        else:
+            await issue_mock_question(p)
 
 
 async def check_win():
@@ -448,6 +506,7 @@ async def check_win():
 async def end_game(winner: str, reason: str):
     for p in list(game.players.values()):
         await cancel_question(p)
+        await cancel_mock_question(p)
     game.state = "ended"
     game.winner = winner
     payload = {
@@ -463,6 +522,7 @@ async def end_game(winner: str, reason: str):
 async def start_meeting(reason: str, caller_id: str):
     for p in list(game.players.values()):
         await cancel_question(p)
+        await cancel_mock_question(p)
     game.state = "meeting"
     game.meeting = {
         "reason": reason,
@@ -535,6 +595,7 @@ async def resolve_votes():
     game.meeting = None
     game.state = "playing"
     await broadcast_state()
+    await resume_questions()
     await check_win()
 
 
@@ -543,6 +604,7 @@ async def pause_for_host_rejoin():
         return
     for p in list(game.players.values()):
         await cancel_question(p)
+        await cancel_mock_question(p)
     game.host_pending = True
     game.host_deadline = time.time() + HOST_PAUSE_SECONDS
     print(f"[SERVER] host disconnected mid-game -> paused for {HOST_PAUSE_SECONDS}s", flush=True)
@@ -575,6 +637,7 @@ async def end_session(reason: str):
     game.host_deadline = None
     for p in list(game.players.values()):
         await cancel_question(p)
+        await cancel_mock_question(p)
     payload = {"type": "session_ended", "reason": reason}
     await broadcast(payload)
     if game.host:
@@ -587,8 +650,13 @@ async def resume_questions():
     if game.state != "playing":
         return
     for p in game.players.values():
-        if p.role == "engineer" and p.alive:
-            await issue_question(p)
+        if not p.alive:
+            continue
+        if p.role == "engineer":
+            if p.stats["correct"] < p.target_questions:
+                await issue_question(p)
+        else:
+            await issue_mock_question(p)
 
 
 async def remove_player(pid: str, voluntary: bool = False):
@@ -610,6 +678,7 @@ async def remove_player(pid: str, voluntary: bool = False):
     if pid in game.players:
         p = game.players.pop(pid)
         await cancel_question(p)
+        await cancel_mock_question(p)
         if voluntary:
             game.disconnected_players.pop(p.client_id, None)
         elif p.client_id:
@@ -715,6 +784,7 @@ async def ws_endpoint(ws: WebSocket):
                         await send_to_ws(ws, {"type": "error", "message": "Host identity cannot join as a player"})
                         continue
                     await cancel_question(existing)
+                    await cancel_mock_question(existing)
                     if existing.id in game.players:
                         del game.players[existing.id]
                     game.disconnected_players.pop(client_id, None)
@@ -793,7 +863,7 @@ async def ws_endpoint(ws: WebSocket):
                     if player.role == "engineer":
                         await issue_question(player)
                     else:
-                        await send_to_ws(ws, {"type": "question", "question": None, "deadline": 0, "seconds": 0})
+                        await issue_mock_question(player)
 
             elif mtype == "vent" and game.state == "playing" and player.alive and player.role == "traitor" and not game.host_pending:
                 target_room = msg.get("room")
@@ -861,6 +931,7 @@ async def ws_endpoint(ws: WebSocket):
                     target = game.players.get(target_id)
                     if target and target.alive and target.role == "engineer" and target.room == player.room:
                         await cancel_question(target)
+                        target.alive = False
                         target.alive = False
                         player.last_kill_time = now
                         await broadcast_state()
