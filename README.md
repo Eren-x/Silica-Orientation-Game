@@ -10,7 +10,13 @@ so you can (a) actually play a round tonight, and (b) read code you already
 understand (Python) to see how a real-time multiplayer game is structured,
 before you decide how much further to take it.
 
-## Run it
+## Play it online
+
+Live deployment: **https://silica-orientation-game-production.up.railway.app**
+
+Open the link in a browser tab per player. Need at least 4 players to start.
+
+## Run it locally
 
 ```bash
 cd Silica-Orientation-Game
@@ -18,10 +24,10 @@ pip install -r requirements.txt   # fastapi, uvicorn, websockets
 python server.py
 ```
 
-The server listens on `0.0.0.0:8000`. Open `http://localhost:8000` in a
-browser tab per player, or share your local IP on the same wifi network so
-friends can join from their phones/laptops: `http://YOUR_LOCAL_IP:8000`.
-Need at least 4 players to start.
+The server listens on `0.0.0.0:8000` (or the `PORT` env var when deployed).
+Open `http://localhost:8000` in a browser tab per player, or share your local
+IP on the same wifi network so friends can join from their phones/laptops:
+`http://YOUR_LOCAL_IP:8000`. Need at least 4 players to start.
 
 ## How a round works
 
