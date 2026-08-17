@@ -179,6 +179,9 @@ def player_state() -> dict:
 
 
 def host_state() -> dict:
+    # IMPORTANT: the host is NOT stored in game.players.
+    # game.players contains participants only. The host receives this
+    # separate dashboard state through game.host_ws.
     return {
         "type": "host_state",
         "state": game.state,
@@ -407,9 +410,15 @@ async def ws_endpoint(ws: WebSocket):
             msg = json.loads(raw)
             mtype = msg.get("type")
 
-            if mtype == "join":
+            if mtype in ("join", "host_join"):
                 name = (msg.get("name") or "Player")[:16]
-                requested_host = bool(msg.get("host"))
+
+                # The current frontend uses type="host_join".
+                # Keep support for the older type="join" + host=true format too.
+                requested_host = (
+                    mtype == "host_join"
+                    or bool(msg.get("host"))
+                )
 
                 if requested_host:
                     if game.host_connected:
@@ -425,6 +434,7 @@ async def ws_endpoint(ws: WebSocket):
                         "is_host": True,
                     })
                     await send_host_state()
+                    await broadcast_lobby()
                     continue
 
                 if game.state != "lobby":
@@ -448,11 +458,17 @@ async def ws_endpoint(ws: WebSocket):
                     else:
                         await start_game()
                 elif mtype == "restart":
+                    existing_host_name = game.host_name
                     game.reset_game()
                     game.host_ws = ws
-                    game.host_name = name_from_host(game.host_name, "Host")
+                    game.host_name = name_from_host(existing_host_name, "Host")
                     game.host_connected = True
-                    await send_ws(ws, {"type": "host_joined", "your_id": connection_id, "is_host": True})
+                    is_host_connection = True
+                    await send_ws(ws, {
+                        "type": "host_joined",
+                        "your_id": connection_id,
+                        "is_host": True
+                    })
                     await broadcast_lobby()
                 continue
 
