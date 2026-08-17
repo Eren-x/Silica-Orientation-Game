@@ -1423,60 +1423,23 @@ function renderHostDashboard(msg = {}) {
 
       /* ROLE */
 
-      const roleTd =
-        document.createElement(
-          "td"
-        );
+      /* ROLE */
 
-      roleTd.className =
-        "role-cell " +
-        (
-          p.role === "traitor"
-            ? "role-traitor"
-            : "role-engineer"
-        );
+const roleTd =
+  document.createElement("td");
 
+roleTd.className =
+  "role-cell " +
+  (
+    p.role === "traitor"
+      ? "role-traitor"
+      : "role-engineer"
+  );
 
-      const roleText =
-        document.createElement(
-          "span"
-        );
-
-      roleText.textContent =
-        roleVisible
-          ? p.role
-          : "Hidden";
-
-
-      const roleButton =
-        document.createElement(
-          "button"
-        );
-
-      roleButton.className =
-        "role-toggle";
-
-      roleButton.textContent =
-        roleVisible
-          ? "Hide"
-          : "Show";
-
-
-      roleButton.onclick =
-        () =>
-          toggleHostRole(
-            p.id
-          );
-
-
-      roleTd.appendChild(
-        roleText
-      );
-
-      roleTd.appendChild(
-        roleButton
-      );
-
+roleTd.textContent =
+  p.role === "traitor"
+    ? "Traitor"
+    : "Engineer";
 
       /* ROOM */
 
