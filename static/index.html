@@ -1,391 +1,132 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-
 <meta charset="UTF-8">
-
-<meta
-  name="viewport"
-  content="width=device-width, initial-scale=1.0"
->
-
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Traitor Engineer</title>
-
-<link
-  rel="stylesheet"
-  href="/static/style.css"
->
-
+<link rel="stylesheet" href="/static/style.css">
 </head>
-
 <body>
-
 <div id="app">
+  <div id="conn-pill" class="conn-pill down">◌ connecting</div>
 
-  <div
-    id="conn-pill"
-    class="conn-pill down"
-  >
-    ◌ connecting
-  </div>
-
-
-  <!-- JOIN -->
-
-  <section
-    id="screen-join"
-    class="screen active"
-  >
-
+  <section id="screen-join" class="screen active">
     <h1>Traitor Engineer</h1>
-
-    <p class="subtitle">
-      Prototype build
-    </p>
-
-
+    <p class="subtitle">Prototype build</p>
     <div class="join-cards">
-
       <div class="join-card">
-
         <h2>Join as player</h2>
-
-        <input
-          id="p-name"
-          maxlength="16"
-          placeholder="Your name"
-        >
-
-        <button id="join-btn">
-          Join game
-        </button>
-
-        <div
-          id="join-error"
-          class="inline-error hidden"
-        ></div>
-
+        <input id="p-name" maxlength="16" placeholder="Your name">
+        <button id="join-btn">Join game</button>
+        <div id="join-error" class="inline-error hidden"></div>
       </div>
-
 
       <div class="join-card host-card">
-
         <h2>Host a game</h2>
-
-        <input
-          id="h-name"
-          maxlength="16"
-          placeholder="Host name"
-        >
-
-        <input
-          id="h-password"
-          type="password"
-          placeholder="Host password"
-        >
-
-        <button id="host-join-btn">
-          Start hosting
-        </button>
-
-        <div
-          id="host-error"
-          class="inline-error hidden"
-        ></div>
-
+        <input id="h-name" maxlength="16" placeholder="Host name">
+        <input id="h-password" type="password" placeholder="Host password">
+        <button id="host-join-btn">Start hosting</button>
+        <div id="host-error" class="inline-error hidden"></div>
       </div>
-
     </div>
-
   </section>
 
-
-  <!-- LOBBY -->
-
-  <section
-    id="screen-lobby"
-    class="screen"
-  >
-
+  <section id="screen-lobby" class="screen">
     <h2>Lobby</h2>
-
     <ul id="lobby-players"></ul>
-
-    <p
-      id="lobby-hint"
-      class="hint"
-    >
-      Need at least 4 players to start.
-    </p>
-
-    <button id="start-btn">
-      Start game
-    </button>
-
+    <p id="lobby-hint" class="hint">Need at least 4 players to start.</p>
   </section>
 
-
-  <!-- GAME -->
-
-  <section
-    id="screen-game"
-    class="screen"
-  >
-
+  <section id="screen-game" class="screen">
     <div id="hud">
-
       <div id="role-badge"></div>
-
-      <div id="progress-pill">
-        Round 0 • 15s
-      </div>
-
-      <div
-        id="sabotage-banner"
-        class="hidden"
-      ></div>
-
+      <div id="progress-pill">Round 0 • 15s</div>
+      <div id="sabotage-banner" class="hidden"></div>
     </div>
-
 
     <div id="minimap-panel">
-
       <h3>Map</h3>
-
       <div id="minimap"></div>
-
     </div>
-
 
     <div id="room-panel">
-
       <h3>Rooms</h3>
-
       <div id="room-list"></div>
-
     </div>
-
 
     <div id="players-panel">
-
       <h3>Players</h3>
-
       <div id="player-list"></div>
-
     </div>
-
-
-    <!-- QUESTION -->
 
     <div id="question-panel">
-
       <h3>Active question</h3>
-
-      <div class="timer-bar">
-
-        <div id="timer-fill"></div>
-
-      </div>
-
-      <div id="timer-label">
-        15.0s
-      </div>
-
+      <div class="timer-bar"><div id="timer-fill"></div></div>
+      <div id="timer-label">15.0s</div>
       <div id="question-card"></div>
-
     </div>
 
-
-    <!-- TRAITOR TOOLS -->
-
-    <div
-      id="traitor-panel"
-      class="hidden"
-    >
-
+    <div id="traitor-panel" class="hidden">
       <h3>Traitor tools</h3>
-
-      <p class="hint">
-        Each round you can either answer the question
-        or use one traitor tool.
-      </p>
-
-      <button id="sabotage-btn">
-        Trigger sabotage
-      </button>
-
-      <button id="kill-btn">
-        Kill someone in your room
-      </button>
-
+      <p class="hint">Each round you can either answer the question or use one traitor tool.</p>
+      <button id="sabotage-btn">Trigger sabotage</button>
+      <button id="kill-btn">Kill someone in your room</button>
     </div>
-
   </section>
 
-
-  <!-- VOTING -->
-
-  <section
-    id="screen-voting"
-    class="screen"
-  >
-
+  <section id="screen-voting" class="screen">
     <h2>Vote Out a Player</h2>
-
-    <p class="hint">
-      The round has ended.
-      Vote for one player to remove from the game.
-    </p>
-
-    <div id="voting-timer">
-      Voting: 20s
-    </div>
-
+    <p class="hint">The round has ended. Vote for one active player to remove from the game.</p>
+    <div id="voting-timer">Voting: 20s</div>
     <div id="voting-players"></div>
-
     <div id="voting-result"></div>
-
   </section>
 
-
-  <!-- GAME OVER -->
-
-  <section
-    id="screen-gameover"
-    class="screen"
-  >
-
+  <section id="screen-gameover" class="screen">
     <h2 id="gameover-title"></h2>
-
     <p id="gameover-reason"></p>
-
     <div id="gameover-roles"></div>
-
-    <button
-      id="restart-btn"
-      style="display:none"
-    >
-      Back to lobby
-    </button>
-
   </section>
 
-
-  <!-- HOST DASHBOARD -->
-
-  <section
-    id="screen-host"
-    class="screen"
-  >
-
+  <section id="screen-host" class="screen">
     <h2>Host dashboard</h2>
-
-    <div
-      id="host-summary"
-      class="hint"
-    ></div>
-
-    <div
-      id="host-live"
-      class="host-live"
-    ></div>
-
-    <div id="host-ready"></div>
-
-    <div
-      id="host-rooms"
-      class="host-rooms"
-    ></div>
-
+    <p class="hint">Participant information is visible here. Roles are hidden until you choose to reveal them.</p>
+    <div id="host-summary" class="hint"></div>
+    <div id="host-live" class="host-live"></div>
 
     <div id="host-table-wrap">
-
       <table id="host-table">
-
         <thead>
-
           <tr>
-
             <th>Player</th>
             <th>Role</th>
             <th>Room</th>
-            <th>Alive</th>
-            <th>Attempted</th>
-            <th>Correct</th>
-            <th>Incorrect</th>
-
+            <th>Status</th>
+            <th>Solved</th>
+            <th>Unsolved</th>
           </tr>
-
         </thead>
-
         <tbody id="host-rows"></tbody>
-
       </table>
-
     </div>
-
 
     <div id="host-actions">
-
-      <button id="host-start-btn">
-        Start game
-      </button>
-
-      <button id="host-restart-btn">
-        Back to lobby
-      </button>
-
-      <button
-        id="end-game-btn"
-        style="display:none"
-      >
-        End game
-      </button>
-
-      <button id="host-leave-btn">
-        Leave
-      </button>
-
+      <button id="host-start-btn">Start game</button>
+      <button id="host-restart-btn" style="display:none">Back to lobby</button>
     </div>
-
-    <div
-      id="host-log"
-      class="hint"
-    ></div>
-
+    <div id="host-log" class="hint"></div>
   </section>
 
-
-  <div
-    id="pause-overlay"
-    class="pause-overlay"
-  >
-
+  <div id="pause-overlay" class="pause-overlay">
     <div class="pause-box">
-
       <h2>Host disconnected</h2>
-
-      <p>
-        Game paused. Waiting for the host to reconnect…
-      </p>
-
-      <div id="pause-count">
-        60s
-      </div>
-
+      <p>Game paused. Waiting for the host to reconnect…</p>
+      <div id="pause-count">60s</div>
     </div>
-
   </div>
 
-
   <div id="toast"></div>
-
 </div>
-
-
-<script src="/static/app.js?v=10"></script>
-
+<script src="/static/app.js?v=11"></script>
 </body>
-
 </html>

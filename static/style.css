@@ -709,3 +709,33 @@ button:disabled {
 #toast.show {
   opacity: 1;
 }
+/* HOST ROLE REVEAL / STATUS */
+.role-cell {
+  white-space: nowrap;
+}
+.role-toggle {
+  padding: 5px 9px;
+  margin: 0 0 0 6px;
+  font-size: 12px;
+}
+.status-active {
+  color: var(--success);
+  font-weight: 600;
+}
+.status-removed {
+  color: var(--danger);
+  font-weight: 600;
+}
+.vent-btn {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+@media (max-width: 700px) {
+  #host-table-wrap {
+    overflow-x: auto;
+  }
+  #host-table {
+    min-width: 680px;
+  }
+}
