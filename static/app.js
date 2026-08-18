@@ -428,7 +428,22 @@ function handleMessage(msg) {
 
       break;
 
+    case "room_question":
 
+  if (Number(msg.round) !== Number(roundNumber)) {
+    break;
+  }
+
+  currentRoom = msg.room || currentRoom;
+  currentQuestion = msg.question || null;
+  answeredThisRound = false;
+
+  renderQuestion();
+  updateProgressLine();
+
+  toast(`Entered ${currentRoom}`);
+
+  break;
     /* =====================================================
        NORMAL PLAYER STATE
        ===================================================== */

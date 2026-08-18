@@ -92,6 +92,7 @@ class Game:
         self.next_task_id = 1
         self.round_number = 0
         self.round_question: Optional[dict] = None
+        self.room_questions = {}
         self.round_ends_at = 0.0
         self.total_correct = 0
         self.target_correct = 0
@@ -106,6 +107,7 @@ class Game:
         self.next_task_id = 1
         self.round_number = 0
         self.round_question = None
+        self.room_questions = {}
         self.round_ends_at = 0.0
         self.total_correct = 0
         self.target_correct = 0
@@ -258,19 +260,31 @@ async def start_game():
 
 
 async def start_round():
-    if game.state == "ended":
-        return
 
-    alive = game.alive_players()
-    if len(alive) <= 1:
-        await check_win()
+    if game.state == "ended":
         return
 
     game.state = "playing"
     game.round_number += 1
-    game.round_question = make_task(game.next_task_id)
-    game.next_task_id += 1
-    game.round_ends_at = time.time() + ROUND_SECONDS
+
+    # Create a different question for every room
+    game.room_questions = {}
+
+    for room in ROOMS:
+        game.room_questions[room] = make_task(
+            game.next_task_id
+        )
+        game.next_task_id += 1
+
+    # Keep a default question for compatibility
+    game.round_question = (
+        game.room_questions["Admin / Security"]
+    )
+
+    game.round_ends_at = (
+        time.time() + ROUND_SECONDS
+    )
+
     game.sabotage_active = None
     game.voting = None
 
@@ -278,21 +292,37 @@ async def start_round():
         p.round_choice = None
         p.answered_this_round = False
 
-    await broadcast({
-        "type": "round_started",
-        "round": game.round_number,
-        "question": public_question(game.round_question),
-        "seconds": ROUND_SECONDS,
-        "round_ends_at": game.round_ends_at,
-    })
+    # Send each player the question belonging
+    # to the room they are currently in.
+    for p in game.players.values():
 
-    # Send the complete fresh state too. This is important because a player
-    # may have been removed during the previous voting phase.
+        room_question = game.room_questions.get(
+            p.room
+        )
+
+        if room_question:
+
+            await send_player(
+                p.id,
+                {
+                    "type": "round_started",
+                    "round": game.round_number,
+                    "question": public_question(
+                        room_question
+                    ),
+                    "seconds": ROUND_SECONDS,
+                    "round_ends_at":
+                        game.round_ends_at
+                }
+            )
+
     await broadcast_state()
 
-    asyncio.create_task(round_timer(game.round_number))
-
-
+    asyncio.create_task(
+        round_timer(
+            game.round_number
+        )
+    )
 async def round_timer(round_no: int):
     await asyncio.sleep(ROUND_SECONDS)
     if game.round_number != round_no or game.state != "playing":
@@ -533,11 +563,6 @@ async def ws_endpoint(ws: WebSocket):
             if mtype == "start_game":
                 await send_player(player.id, {"type": "error", "message": "Only the host can start the game"})
 
-            elif mtype == "move_room" and game.state == "playing" and player.alive:
-                room = msg.get("room")
-                if room in ROOMS:
-                    player.room = room
-                    await broadcast_state()
 
             elif mtype == "vent" and game.state == "playing" and player.alive and player.role == "traitor":
                 target_room = msg.get("room")
@@ -549,35 +574,137 @@ async def ws_endpoint(ws: WebSocket):
                         valid_targets.add(a)
                 if target_room in valid_targets:
                     player.room = target_room
+
+                    room_question = game.room_questions.get(
+                        target_room
+                    )
+
+                    if room_question:
+                        await send_player(
+                            player.id,
+                            {
+                                "type": "room_question",
+                                "room": target_room,
+                                "question": public_question(room_question),
+                                "round": game.round_number
+                            }
+                        )
+
                     await broadcast_state()
 
+            elif (
+                mtype == "move_room"
+                and game.state == "playing"
+                and player.alive
+            ):
+                    room = msg.get("room")
+                    if room in ROOMS:
+                        player.room = room
+
+                        room_question = game.room_questions.get(room)
+
+                        if room_question:
+                            await send_player(
+                                player.id,
+                            {
+                                "type": "room_question",
+                                "room": room,
+                                "question": public_question(
+                                    room_question
+                                ),
+                                "round": game.round_number
+                            }
+                        )
+
+                    await broadcast_state()
+                    
             elif mtype == "do_task" and game.state == "playing" and player.alive:
-                q = game.round_question
-                if not q or msg.get("task_id") != q["id"]:
-                    continue
 
-                if player.round_choice == "tool":
-                    await send_player(player.id, {"type": "error", "message": "You already used your traitor tool this round"})
-                    continue
                 if player.answered_this_round:
+                    await send_player(
+                        player.id,
+                        {
+                            "type": "task_result",
+                            "task_id": msg.get("task_id"),
+                            "correct": False,
+                            "message": "You already answered this round"
+                        }
+                    )
                     continue
 
-                if player.role == "engineer" and game.sabotage_active:
-                    await send_player(player.id, {"type": "task_result", "task_id": q["id"], "correct": False, "blocked": True})
+                if player.round_choice is not None:
+                    await send_player(
+                        player.id,
+                        {
+                            "type": "task_result",
+                            "task_id": msg.get("task_id"),
+                            "correct": False,
+                            "message": "You already used your action this round"
+                        }
+                    )
                     continue
 
-                player.round_choice = "question"
+                if game.sabotage_active:
+                    await send_player(
+                        player.id,
+                        {
+                            "type": "task_result",
+                            "task_id": msg.get("task_id"),
+                            "blocked": True
+                        }
+                    )
+                    continue
+
+                task_id = msg.get("task_id")
                 answer = msg.get("answer")
-                correct = answer == q["answer"]
+
+                question = game.room_questions.get(player.room)
+
+                if not question:
+                    await send_player(
+                        player.id,
+                        {
+                            "type": "task_result",
+                            "task_id": task_id,
+                            "correct": False
+                        }
+                    )
+                    continue
+
+                if question.get("id") != task_id:
+                    await send_player(
+                        player.id,
+                        {
+                            "type": "task_result",
+                            "task_id": task_id,
+                            "correct": False,
+                            "message": "This question is no longer active"
+                        }
+                    )
+                    continue
+
+                correct = answer == question.get("answer")
+
                 if correct:
-                    player.answered_this_round = True
                     player.solved_questions += 1
                     game.total_correct += 1
+                    player.answered_this_round = True
+                    player.round_choice = "answer"
+                else:
+                    player.unsolved_questions += 1
 
-                await send_player(player.id, {"type": "task_result", "task_id": q["id"], "correct": correct})
-                if correct:
-                    await broadcast_state()
-                    await check_win()
+                await send_player(
+                    player.id,
+                    {
+                        "type": "task_result",
+                        "task_id": task_id,
+                        "correct": correct
+                    }
+                )
+
+                await broadcast_state()
+
+                await check_win()
 
             elif mtype == "sabotage" and game.state == "playing" and player.alive and player.role == "traitor":
                 if player.round_choice is not None:
