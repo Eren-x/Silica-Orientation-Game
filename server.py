@@ -95,6 +95,7 @@ class Game:
         self.round_ends_at = 0.0
         self.total_correct = 0
         self.target_correct = 0
+        self.vote_lock = asyncio.Lock()
 
     def reset_game(self):
         self.players = {}
@@ -260,6 +261,11 @@ async def start_round():
     if game.state == "ended":
         return
 
+    alive = game.alive_players()
+    if len(alive) <= 1:
+        await check_win()
+        return
+
     game.state = "playing"
     game.round_number += 1
     game.round_question = make_task(game.next_task_id)
@@ -279,7 +285,11 @@ async def start_round():
         "seconds": ROUND_SECONDS,
         "round_ends_at": game.round_ends_at,
     })
-    await send_host_state()
+
+    # Send the complete fresh state too. This is important because a player
+    # may have been removed during the previous voting phase.
+    await broadcast_state()
+
     asyncio.create_task(round_timer(game.round_number))
 
 
@@ -330,8 +340,13 @@ async def start_voting():
         return
 
     alive = game.alive_players()
+
     if len(alive) <= 1:
         await check_win()
+        return
+
+    # Never create a second voting phase for the same round.
+    if game.state == "voting" and game.voting is not None:
         return
 
     game.state = "voting"
@@ -340,60 +355,100 @@ async def start_voting():
         "ends_at": time.time() + VOTING_SECONDS,
     }
 
+    voting_ref = game.voting
+
     await broadcast({
         "type": "voting_started",
         "voting_seconds": VOTING_SECONDS,
-        "voting_ends_at": game.voting["ends_at"],
+        "voting_ends_at": voting_ref["ends_at"],
     })
-    await send_host_state()
-    asyncio.create_task(voting_timer(game.voting))
+
+    await broadcast_state()
+
+    asyncio.create_task(voting_timer(voting_ref))
 
 
 async def voting_timer(voting_ref):
     await asyncio.sleep(VOTING_SECONDS)
+
     if game.voting is not voting_ref or game.state != "voting":
         return
+
     await resolve_votes()
 
 
 async def resolve_votes():
-    voting = game.voting
-    if not voting:
-        return
+    # A vote can finish either because the timer expires or because every
+    # alive player has voted. These can happen at almost the same moment, so
+    # serialize resolution and make the operation one-shot.
+    async with game.vote_lock:
+        if game.state != "voting" or game.voting is None:
+            return
 
-    alive = game.alive_players()
-    tally: dict[str, int] = {}
-    for target in voting["votes"].values():
-        if target in {p.id for p in alive}:
-            tally[target] = tally.get(target, 0) + 1
+        voting = game.voting
+        game.voting = None
+        game.state = "resolving"
 
-    if tally:
-        top = max(tally.values())
-        top_targets = [target for target, count in tally.items() if count == top]
-        eliminated = random.choice(top_targets)
-    else:
-        eliminated = random.choice(alive).id if alive else None
+        alive = game.alive_players()
+        alive_ids = {p.id for p in alive}
 
-    eliminated_role = None
-    eliminated_name = None
-    if eliminated:
-        target = game.players.get(eliminated)
-        if target and target.alive:
-            target.alive = False
-            eliminated_role = target.role
-            eliminated_name = target.name
+        tally: dict[str, int] = {}
 
-    await broadcast({
-        "type": "voting_result",
-        "tally": tally,
-        "eliminated": eliminated,
-        "eliminated_name": eliminated_name,
-    })
-    await send_host_state()
+        for target in voting["votes"].values():
+            if target in alive_ids:
+                tally[target] = tally.get(target, 0) + 1
 
-    game.voting = None
-    await check_win()
-    if game.state == "playing":
+        if tally:
+            top = max(tally.values())
+            top_targets = [
+                target
+                for target, count in tally.items()
+                if count == top
+            ]
+            eliminated = random.choice(top_targets)
+        else:
+            eliminated = random.choice(alive).id if alive else None
+
+        eliminated_role = None
+        eliminated_name = None
+
+        if eliminated:
+            target = game.players.get(eliminated)
+
+            if target and target.alive:
+                target.alive = False
+                eliminated_role = target.role
+                eliminated_name = target.name
+
+        await broadcast({
+            "type": "voting_result",
+            "tally": tally,
+            "eliminated": eliminated,
+            "eliminated_name": eliminated_name,
+            "eliminated_role": eliminated_role,
+        })
+
+        # Push the elimination immediately so every client has the correct
+        # alive/dead list before the next round begins.
+        await broadcast_state()
+
+        await check_win()
+
+        if game.state == "ended":
+            return
+
+        remaining = game.alive_players()
+
+        if len(remaining) <= 1:
+            await check_win()
+            return
+
+        # Small transition so the result is visible before the next question.
+        await asyncio.sleep(1)
+
+        if game.state == "ended":
+            return
+
         await start_round()
 
 

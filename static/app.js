@@ -12,6 +12,7 @@ let revealedRoles = new Set();
 let currentQuestion = null;
 let roundNumber = 0;
 let roundEndsAt = 0;
+let roundDurationSeconds = 15;
 let answeredThisRound = false;
 let totalCorrect = 0;
 let targetCorrect = 0;
@@ -86,11 +87,35 @@ function connect() {
 }
 
 function connectAndJoin(payload) {
-  connect();
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+
+  if (ws) {
+    try {
+      ws.close();
+    } catch (_) {}
+  }
+
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
 
   ws.onopen = () => {
     setConnection(true);
     ws.send(JSON.stringify(payload));
+  };
+
+  ws.onmessage = ev => {
+    try {
+      handleMessage(JSON.parse(ev.data));
+    } catch (err) {
+      console.error("Invalid server message", err);
+    }
+  };
+
+  ws.onclose = () => {
+    setConnection(false);
+  };
+
+  ws.onerror = () => {
+    setConnection(false);
   };
 }
 
@@ -368,21 +393,36 @@ function handleMessage(msg) {
 
       votingActive = false;
 
+      if (votingTimer) {
+        clearInterval(votingTimer);
+        votingTimer = null;
+      }
+
       roundNumber =
-        msg.round;
+        Number(msg.round) || 0;
 
       currentQuestion =
-        msg.question;
+        msg.question || null;
 
-      answeredThisRound =
-        false;
+      answeredThisRound = false;
+
+      roundDurationSeconds =
+        Number(msg.seconds) || 15;
 
       roundEndsAt =
-        msg.round_ends_at * 1000;
+        Number(msg.round_ends_at || 0) * 1000;
+
+      const votingResult = $("#voting-result");
+
+      if (votingResult) {
+        votingResult.textContent = "";
+      }
 
       renderQuestion();
 
       startCountdown();
+
+      updateProgressLine();
 
       show("#screen-game");
 
@@ -466,6 +506,13 @@ function handleMessage(msg) {
         renderVotingScreen();
 
         show("#screen-voting");
+
+      } else if (
+        msg.state === "playing" &&
+        currentQuestion
+      ) {
+
+        show("#screen-game");
       }
 
       break;
@@ -492,12 +539,19 @@ function handleMessage(msg) {
 
       votingEndsAt =
         (
-          msg.voting_ends_at ||
+          Number(msg.voting_ends_at) ||
           (
             Date.now() / 1000 +
-            msg.voting_seconds
+            Number(msg.voting_seconds || 20)
           )
         ) * 1000;
+
+      const votingResultEl =
+        $("#voting-result");
+
+      if (votingResultEl) {
+        votingResultEl.textContent = "";
+      }
 
       renderVotingScreen();
 
@@ -782,6 +836,12 @@ function updateProgressLine() {
 
   if ($("#timer-fill")) {
 
+    const duration =
+      Math.max(
+        1,
+        roundDurationSeconds
+      );
+
     const percent =
       Math.max(
         0,
@@ -792,7 +852,7 @@ function updateProgressLine() {
               roundEndsAt -
               Date.now()
             ) /
-            15000
+            (duration * 1000)
           ) * 100
         )
       );
@@ -857,6 +917,8 @@ function startVotingCountdown() {
       clearInterval(
         votingTimer
       );
+
+      votingTimer = null;
     }
   };
 
@@ -897,8 +959,6 @@ function renderSabotage(sabotage) {
     );
   }
 }
-
-
 /* =========================================================
    QUESTION
    ========================================================= */
@@ -1199,8 +1259,8 @@ function renderVotingResult(msg) {
 
     result.textContent =
       msg.eliminated_name
-        ? `${msg.eliminated_name} was removed from the game.`
-        : "No player was removed.";
+        ? `${msg.eliminated_name} was removed from the game. Starting next round...`
+        : "No player was removed. Starting next round...";
   }
 
   show(
@@ -1404,12 +1464,6 @@ function renderHostDashboard(msg = {}) {
         );
 
 
-      const roleVisible =
-        revealedRoles.has(
-          p.id
-        );
-
-
       /* PLAYER NAME */
 
       const nameTd =
@@ -1423,23 +1477,58 @@ function renderHostDashboard(msg = {}) {
 
       /* ROLE */
 
-      /* ROLE */
+      const roleTd =
+        document.createElement("td");
 
-const roleTd =
-  document.createElement("td");
+      roleTd.className =
+        "role-cell";
 
-roleTd.className =
-  "role-cell " +
-  (
-    p.role === "traitor"
-      ? "role-traitor"
-      : "role-engineer"
-  );
+      const roleVisible =
+        revealedRoles.has(p.id);
 
-roleTd.textContent =
-  p.role === "traitor"
-    ? "Traitor"
-    : "Engineer";
+      if (roleVisible) {
+
+        roleTd.classList.add(
+          p.role === "traitor"
+            ? "role-traitor"
+            : "role-engineer"
+        );
+
+        roleTd.textContent =
+          p.role === "traitor"
+            ? "Traitor"
+            : "Engineer";
+
+      } else {
+
+        roleTd.textContent =
+          "Hidden";
+      }
+
+
+      const roleButton =
+        document.createElement(
+          "button"
+        );
+
+      roleButton.type =
+        "button";
+
+      roleButton.className =
+        "role-toggle";
+
+      roleButton.textContent =
+        roleVisible
+          ? "Hide"
+          : "Reveal";
+
+      roleButton.onclick = () =>
+        toggleHostRole(p.id);
+
+      roleTd.appendChild(
+        roleButton
+      );
+
 
       /* ROOM */
 
@@ -1611,9 +1700,7 @@ roleTd.textContent =
           );
 
         dot.textContent =
-          p.alive
-            ? "●"
-            : "●";
+          "●";
 
 
         const name =
